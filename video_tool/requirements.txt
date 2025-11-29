@@ -1,0 +1,13 @@
+PyQt6
+openai-whisper
+ffmpeg-python
+requests
+ttsfm
+elevenlabs
+dashscope
+srt
+demucs
+torch==2.9.1
+torchvision
+torchaudio
+mutagen
