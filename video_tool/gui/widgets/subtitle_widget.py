@@ -187,7 +187,7 @@ class SubtitleWidget(QWidget):
         engine_row = QHBoxLayout()
         engine_row.addWidget(QLabel("引擎:"))
         self.engine_combo = QComboBox()
-        self.engine_combo.addItems(["Deepseek", "DeepLX (非AI)", "自定义第三方"])
+        self.engine_combo.addItems(["Deepseek", "LongCat", "OpenRouter", "DeepLX (非AI)", "自定义第三方"])
         self.engine_combo.currentIndexChanged.connect(self.on_engine_changed)
         engine_row.addWidget(self.engine_combo)
         engine_row.addStretch()
@@ -410,7 +410,25 @@ class SubtitleWidget(QWidget):
             self.prompt_combo.setEnabled(True)
             self.prompt_preview.setEnabled(True)
             self.refresh_prompt_btn.setEnabled(True)
-        elif index == 1:  # DeepLX
+        elif index == 1:  # 美团LongCat
+            self.api_url_edit.setText("https://api.longcat.chat/openai/v1/chat/completions")
+            self.api_url_edit.setEnabled(True)
+            self.model_edit.setText("LongCat-Flash-Chat")
+            self.model_edit.setEnabled(True)
+            self.api_key_edit.setPlaceholderText("输入 LongCat API Key...")
+            self.prompt_combo.setEnabled(True)
+            self.prompt_preview.setEnabled(True)
+            self.refresh_prompt_btn.setEnabled(True)
+        elif index == 2:  # OpenRouter
+            self.api_url_edit.setText("https://openrouter.ai/api/v1/chat/completions")
+            self.api_url_edit.setEnabled(True)
+            self.model_edit.setText("x-ai/grok-4.1-fast:free")
+            self.model_edit.setEnabled(True)
+            self.api_key_edit.setPlaceholderText("输入 OpenRouter API Key...")
+            self.prompt_combo.setEnabled(True)
+            self.prompt_preview.setEnabled(True)
+            self.refresh_prompt_btn.setEnabled(True)
+        elif index == 3:  # DeepLX
             self.api_url_edit.setText("https://api.deeplx.org/{key}/translate")
             self.api_url_edit.setEnabled(False)
             self.model_edit.setText("")
@@ -557,7 +575,8 @@ class SubtitleWidget(QWidget):
             self.manager = SubtitleManager()
         
         engine_index = self.engine_combo.currentIndex()
-        engine_type = ["deepseek", "deeplx", "custom"][engine_index]
+        # 0: Deepseek, 1: 美团LongCat, 2: OpenRouter, 3: DeepLX, 4: 自定义
+        engine_type = ["deepseek", "longcat", "openrouter", "deeplx", "custom"][engine_index]
         
         self.manager.set_engine(
             engine_type,
