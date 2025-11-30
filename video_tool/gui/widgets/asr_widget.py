@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QLineEdit, QPushButton, QFileDialog, QComboBox,
                              QGroupBox, QProgressBar, QRadioButton, 
-                             QButtonGroup, QCheckBox)
+                             QButtonGroup, QCheckBox, QSpinBox, QDoubleSpinBox)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from .console_widget import console_info, console_error, console_warning
 import os
@@ -12,7 +12,10 @@ class ASRThread(QThread):
     progress = pyqtSignal(str)
     
     def __init__(self, audio_path, output_path, model_size, engine_type, api_key=None, 
-                 language_code=None, diarize=False, api_url=None):
+                 language_code=None, diarize=False, api_url=None,
+                 pause_threshold=0.5, max_words_per_segment=12,
+                 ai_optimize=False, optimize_level="medium",
+                 ai_api_key=None, ai_api_url=None, ai_model=None):
         super().__init__()
         self.audio_path = audio_path
         self.output_path = output_path
@@ -22,6 +25,14 @@ class ASRThread(QThread):
         self.language_code = language_code
         self.diarize = diarize
         self.api_url = api_url
+        self.pause_threshold = pause_threshold
+        self.max_words_per_segment = max_words_per_segment
+        # AI 优化参数
+        self.ai_optimize = ai_optimize
+        self.optimize_level = optimize_level
+        self.ai_api_key = ai_api_key
+        self.ai_api_url = ai_api_url
+        self.ai_model = ai_model
     
     def run(self):
         try:
@@ -33,13 +44,39 @@ class ASRThread(QThread):
                 api_key=self.api_key,
                 api_url=self.api_url
             )
-            self.progress.emit("开始转录...")
-            processor.transcribe(
+            # 设置断句参数
+            processor.pause_threshold = self.pause_threshold
+            processor.max_words_per_segment = self.max_words_per_segment
+            
+            self.progress.emit(f"开始转录... (停顿阈值: {self.pause_threshold}s, 每段最大词数: {self.max_words_per_segment})")
+            
+            # 先获取原始转录结果
+            segments = processor.transcribe(
                 self.audio_path, 
-                self.output_path,
+                output_srt_path=None,  # 先不保存，获取 segments
                 language_code=self.language_code,
                 diarize=self.diarize
             )
+            
+            # 如果启用了 AI 优化
+            if self.ai_optimize and self.ai_api_key and self.ai_api_url:
+                self.progress.emit(f"正在使用 AI 优化字幕 (强度: {self.optimize_level})...")
+                try:
+                    segments = processor.optimize_with_ai(
+                        segments,
+                        api_key=self.ai_api_key,
+                        api_url=self.ai_api_url,
+                        model=self.ai_model,
+                        optimize_level=self.optimize_level,
+                        progress_callback=lambda msg: self.progress.emit(msg)
+                    )
+                    self.progress.emit("AI 优化完成")
+                except Exception as e:
+                    self.progress.emit(f"AI 优化失败: {e}，使用原始结果")
+            
+            # 保存最终结果
+            processor._save_as_srt(segments, self.output_path)
+            
             self.finished.emit(True, f"字幕生成成功！保存至: {self.output_path}")
         except Exception as e:
             self.finished.emit(False, f"错误: {str(e)}")
@@ -182,9 +219,50 @@ class ASRWidget(QWidget):
         lang_layout.addWidget(self.diarize_check)
         lang_layout.addStretch()
         
+        # 断句设置（Whisper）
+        segment_layout = QHBoxLayout()
+        segment_layout.addWidget(QLabel("断句设置:"))
+        
+        segment_layout.addWidget(QLabel("停顿阈值:"))
+        self.pause_threshold_spin = QDoubleSpinBox()
+        self.pause_threshold_spin.setRange(0.1, 3.0)
+        self.pause_threshold_spin.setSingleStep(0.1)
+        self.pause_threshold_spin.setValue(0.5)
+        self.pause_threshold_spin.setDecimals(1)
+        self.pause_threshold_spin.setSuffix(" 秒")
+        self.pause_threshold_spin.setToolTip("超过此时间的停顿会分成新段落")
+        segment_layout.addWidget(self.pause_threshold_spin)
+        
+        segment_layout.addWidget(QLabel("每段最大词数:"))
+        self.max_words_spin = QSpinBox()
+        self.max_words_spin.setRange(5, 50)
+        self.max_words_spin.setValue(12)
+        self.max_words_spin.setToolTip("每个字幕段落的最大词数")
+        segment_layout.addWidget(self.max_words_spin)
+        
+        segment_layout.addStretch()
+        
+        # AI 优化选项
+        ai_optimize_layout = QHBoxLayout()
+        self.ai_optimize_check = QCheckBox("AI 优化字幕")
+        self.ai_optimize_check.setToolTip("使用 AI 优化语句流畅度和断句（需要配置翻译引擎的 API）")
+        self.ai_optimize_check.stateChanged.connect(self.on_ai_optimize_changed)
+        ai_optimize_layout.addWidget(self.ai_optimize_check)
+        
+        ai_optimize_layout.addWidget(QLabel("优化强度:"))
+        self.optimize_level_combo = QComboBox()
+        self.optimize_level_combo.addItems(["轻度 (仅断句)", "中度 (断句+润色)", "重度 (完全重写)"])
+        self.optimize_level_combo.setCurrentIndex(1)
+        self.optimize_level_combo.setEnabled(False)
+        self.optimize_level_combo.setToolTip("轻度: 只优化断句\n中度: 优化断句并润色语句\n重度: 完全重写使其更流畅")
+        ai_optimize_layout.addWidget(self.optimize_level_combo)
+        ai_optimize_layout.addStretch()
+        
         output_layout.addLayout(output_file_layout)
         output_layout.addLayout(model_layout)
         output_layout.addLayout(lang_layout)
+        output_layout.addLayout(segment_layout)
+        output_layout.addLayout(ai_optimize_layout)
         output_group.setLayout(output_layout)
         
         # 执行按钮
@@ -612,7 +690,40 @@ class ASRWidget(QWidget):
         
         self.process_btn.setEnabled(False)
         self.progress_bar.show()
+        
+        # 获取断句参数
+        pause_threshold = self.pause_threshold_spin.value()
+        max_words = self.max_words_spin.value()
+        
         self.log(f"开始语音识别 (使用 {engine_type.upper()})...")
+        self.log(f"断句设置: 停顿阈值={pause_threshold}s, 每段最大词数={max_words}")
+        
+        # AI 优化参数
+        ai_optimize = self.ai_optimize_check.isChecked()
+        optimize_level_text = self.optimize_level_combo.currentText()
+        if "轻度" in optimize_level_text:
+            optimize_level = "light"
+        elif "重度" in optimize_level_text:
+            optimize_level = "heavy"
+        else:
+            optimize_level = "medium"
+        
+        # 获取 AI API 配置
+        ai_api_key = None
+        ai_api_url = None
+        ai_model = None
+        
+        if ai_optimize:
+            ai_config = self._get_ai_config()
+            ai_api_key = ai_config.get("api_key")
+            ai_api_url = ai_config.get("api_url")
+            ai_model = ai_config.get("model")
+            
+            if not ai_api_key:
+                self.log("⚠️ AI 优化已启用但未配置 API，请在字幕翻译页面设置翻译引擎")
+                ai_optimize = False
+            else:
+                self.log(f"AI 优化已启用 (强度: {optimize_level_text})")
         
         self.thread = ASRThread(
             audio_path, output_path, 
@@ -621,7 +732,14 @@ class ASRWidget(QWidget):
             api_key,
             language_code,
             diarize,
-            api_url
+            api_url,
+            pause_threshold=pause_threshold,
+            max_words_per_segment=max_words,
+            ai_optimize=ai_optimize,
+            optimize_level=optimize_level,
+            ai_api_key=ai_api_key,
+            ai_api_url=ai_api_url,
+            ai_model=ai_model
         )
         self.thread.finished.connect(self.on_process_finished)
         self.thread.progress.connect(self.log)
@@ -637,6 +755,33 @@ class ASRWidget(QWidget):
             engine_text = self.engine_combo.currentText()
             if "ElevenLabs" in engine_text or "Qwen" in engine_text:
                 self.save_api_key_to_config()
+    
+    def on_ai_optimize_changed(self, state):
+        """当 AI 优化选项改变时"""
+        enabled = state == Qt.CheckState.Checked.value
+        self.optimize_level_combo.setEnabled(enabled)
+        
+        if enabled:
+            # 检查是否配置了翻译 API
+            ai_config = self._get_ai_config()
+            if not ai_config.get("api_key"):
+                self.log("⚠️ AI 优化需要配置翻译引擎的 API（在字幕翻译页面设置）")
+    
+    def _get_ai_config(self):
+        """从配置文件获取 AI/翻译 API 配置"""
+        import json
+        try:
+            with open("config.json", "r") as f:
+                config = json.load(f)
+                subtitle_settings = config.get("subtitle_settings", {})
+                return {
+                    "api_key": subtitle_settings.get("api_key", ""),
+                    "api_url": subtitle_settings.get("api_url", "https://api.deepseek.com/v1/chat/completions"),
+                    "model": subtitle_settings.get("model", "deepseek-chat")
+                }
+        except Exception as e:
+            print(f"读取 AI 配置失败: {e}")
+            return {}
     
     def log(self, message):
         console_info(message, "语音识别")

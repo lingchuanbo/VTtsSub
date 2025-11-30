@@ -200,7 +200,10 @@ class AudioExtractorWidget(QWidget):
         demucs_layout.addLayout(device_layout)
         demucs_layout.addWidget(info_label)
         self.demucs_options.setLayout(demucs_layout)
-        self.demucs_options.setVisible(False)
+        
+        # 默认显示 Demucs 选项，隐藏简单提取选项
+        self.simple_options.setVisible(False)
+        self.demucs_options.setVisible(True)
         
         # 执行按钮
         self.extract_btn = QPushButton("开始处理")
@@ -355,10 +358,5 @@ class AudioExtractorWidget(QWidget):
         console_info(message, "音频提取")
     
     def get_ffmpeg_path(self):
-        import json
-        try:
-            with open("config.json", "r") as f:
-                config = json.load(f)
-                return config.get("ffmpeg_path", "ffmpeg")
-        except:
-            return "ffmpeg"
+        from video_tool.utils import get_ffmpeg_path
+        return get_ffmpeg_path()

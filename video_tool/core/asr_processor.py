@@ -17,6 +17,9 @@ class ASRProcessor:
         self.api_key = api_key
         self.api_url = api_url or "https://dashscope-intl.aliyuncs.com/api/v1"
         self.model = None
+        # 断句参数
+        self.pause_threshold = 0.5  # 停顿阈值（秒）
+        self.max_words_per_segment = 12  # 每段最大词数
 
     def transcribe(self, audio_path, output_srt_path=None, language_code=None, diarize=False):
         """
@@ -163,7 +166,9 @@ class ASRProcessor:
                 # But run_whisper.py only prints JSON to stdout, unless libraries print to stdout
                 # We'll try to parse the whole thing first
                 result = json.loads(stdout_str)
-                return result["segments"]
+                segments = result["segments"]
+                # 基于词级时间戳优化字幕分段
+                return self._optimize_segments_by_words(segments)
             except json.JSONDecodeError:
                 # Try to find JSON object in the output (in case of noise)
                 import re
@@ -171,7 +176,8 @@ class ASRProcessor:
                 if match:
                     try:
                         result = json.loads(match.group(0))
-                        return result["segments"]
+                        segments = result["segments"]
+                        return self._optimize_segments_by_words(segments)
                     except:
                         pass
                 raise RuntimeError(f"Failed to parse Whisper output: {stdout_str}")
@@ -688,6 +694,292 @@ class ASRProcessor:
         if len(sentences) % 2 == 1 and sentences[-1].strip():
             result.append(sentences[-1].strip())
         return result if result else [text]
+    
+    def _optimize_segments_by_words(self, segments, pause_threshold=None, max_words_per_segment=None):
+        """
+        基于词级时间戳优化字幕分段，让字幕与语音精确同步
+        
+        Args:
+            segments: Whisper 返回的原始 segments
+            pause_threshold: 停顿阈值（秒），超过此时间视为新段落
+            max_words_per_segment: 每段最大词数
+            
+        Returns:
+            优化后的 segments 列表
+        """
+        # 使用实例属性或默认值
+        if pause_threshold is None:
+            pause_threshold = getattr(self, 'pause_threshold', 0.5)
+        if max_words_per_segment is None:
+            max_words_per_segment = getattr(self, 'max_words_per_segment', 12)
+        
+        optimized = []
+        
+        for segment in segments:
+            # 检查是否有词级时间戳
+            words = segment.get("words", [])
+            
+            if not words:
+                # 没有词级时间戳，保持原样
+                optimized.append({
+                    "start": segment["start"],
+                    "end": segment["end"],
+                    "text": segment["text"]
+                })
+                continue
+            
+            # 基于停顿和词数重新分段
+            current_segment = {
+                "start": None,
+                "end": None,
+                "words": []
+            }
+            
+            for i, word_info in enumerate(words):
+                word = word_info.get("word", "")
+                word_start = word_info.get("start", 0)
+                word_end = word_info.get("end", 0)
+                
+                # 检查是否需要开始新段落（在添加当前词之前）
+                start_new_segment = False
+                
+                if current_segment["start"] is None:
+                    # 第一个词，不分段
+                    start_new_segment = False
+                elif len(current_segment["words"]) >= max_words_per_segment:
+                    # 达到最大词数，强制分段
+                    start_new_segment = True
+                elif word_start - current_segment["end"] > pause_threshold:
+                    # 停顿超过阈值，分段
+                    start_new_segment = True
+                
+                if start_new_segment and current_segment["words"]:
+                    # 保存当前段落
+                    optimized.append({
+                        "start": current_segment["start"],
+                        "end": current_segment["end"],
+                        "text": "".join(current_segment["words"]).strip()
+                    })
+                    current_segment = {
+                        "start": None,
+                        "end": None,
+                        "words": []
+                    }
+                
+                # 添加当前词
+                if current_segment["start"] is None:
+                    current_segment["start"] = word_start
+                current_segment["end"] = word_end
+                current_segment["words"].append(word)
+            
+            # 保存最后一个段落
+            if current_segment["words"]:
+                optimized.append({
+                    "start": current_segment["start"],
+                    "end": current_segment["end"],
+                    "text": "".join(current_segment["words"]).strip()
+                })
+        
+        return optimized
+
+    def optimize_with_ai(self, segments, api_key, api_url, model, optimize_level="medium", progress_callback=None):
+        """
+        使用 AI 优化字幕的断句和流畅度
+        
+        Args:
+            segments: 字幕段落列表 [{"start": float, "end": float, "text": str}, ...]
+            api_key: API Key
+            api_url: API URL
+            model: 模型名称
+            optimize_level: 优化强度 "light"(轻度), "medium"(中度), "heavy"(重度)
+            progress_callback: 进度回调函数
+            
+        Returns:
+            优化后的 segments 列表
+        """
+        import requests
+        import re
+        
+        if not segments:
+            return segments
+        
+        # 根据优化强度选择提示词
+        if optimize_level == "light":
+            system_prompt = """你是字幕断句专家。请优化以下ASR识别的字幕断句，使其更自然。
+
+规则：
+1. 只调整断句位置，不修改文字内容
+2. 在语义完整的地方断句，避免句子中间断开
+3. 可以合并过短的相邻句子，或拆分过长的句子
+4. 保持时间轴连续，合理分配时间"""
+        elif optimize_level == "heavy":
+            system_prompt = """你是专业字幕编辑。请完全重写以下ASR识别的字幕，使其流畅自然。
+
+规则：
+1. 可以完全重写句子，使表达更清晰流畅
+2. 删除所有口语化的填充词和重复
+3. 优化断句，使每条字幕长度适中
+4. 保持原意不变，时间轴合理分配"""
+        else:  # medium
+            system_prompt = """你是字幕优化专家。请优化以下ASR识别的字幕，使其更流畅。
+
+规则：
+1. 优化断句位置，在语义完整处断开
+2. 适当润色语句，删除明显的口语填充词（如"嗯"、"那个"）
+3. 保持原意和风格不变
+4. 时间轴需要合理对应文本长度"""
+        
+        # 准备输入数据
+        input_lines = []
+        for i, seg in enumerate(segments):
+            start_ts = self._format_timestamp(seg["start"])
+            end_ts = self._format_timestamp(seg["end"])
+            input_lines.append(f"{i+1}|{start_ts}|{end_ts}|{seg['text']}")
+        
+        # 分批处理（每批20条）
+        batch_size = 20
+        all_optimized = []
+        total_batches = (len(input_lines) + batch_size - 1) // batch_size
+        
+        for batch_idx in range(total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(input_lines))
+            batch_lines = input_lines[start_idx:end_idx]
+            
+            if progress_callback:
+                progress_callback(f"AI优化中... 批次 {batch_idx + 1}/{total_batches}")
+            
+            user_message = f"""请优化以下 {len(batch_lines)} 条字幕：
+
+{chr(10).join(batch_lines)}
+
+输出格式要求：
+- 每行格式: 序号|开始时间|结束时间|优化后文本
+- 时间格式: HH:MM:SS,mmm
+- 可以合并或拆分条目，但时间必须连续
+- 只输出优化结果，不要其他说明"""
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                "temperature": 0.3
+            }
+            
+            try:
+                response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+                
+                if response.status_code != 200:
+                    print(f"AI优化请求失败 ({response.status_code}): {response.text}")
+                    # 失败时保留原始数据
+                    for line in batch_lines:
+                        parts = line.split('|', 3)
+                        if len(parts) == 4:
+                            all_optimized.append({
+                                "start": self._parse_timestamp(parts[1]),
+                                "end": self._parse_timestamp(parts[2]),
+                                "text": parts[3]
+                            })
+                    continue
+                
+                result = response.json()
+                content = result['choices'][0]['message']['content']
+                
+                # 解析优化结果
+                optimized_batch = self._parse_ai_optimized_response(content, batch_lines)
+                all_optimized.extend(optimized_batch)
+                
+            except Exception as e:
+                print(f"AI优化出错: {e}")
+                # 失败时保留原始数据
+                for line in batch_lines:
+                    parts = line.split('|', 3)
+                    if len(parts) == 4:
+                        all_optimized.append({
+                            "start": self._parse_timestamp(parts[1]),
+                            "end": self._parse_timestamp(parts[2]),
+                            "text": parts[3]
+                        })
+        
+        if progress_callback:
+            progress_callback(f"AI优化完成，共 {len(all_optimized)} 条字幕")
+        
+        return all_optimized if all_optimized else segments
+    
+    def _parse_ai_optimized_response(self, content, original_lines):
+        """解析AI优化后的响应"""
+        import re
+        
+        optimized = []
+        lines = content.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('```'):
+                continue
+            
+            # 匹配格式: 序号|时间|时间|文本
+            match = re.match(r'^(\d+)\|([^|]+)\|([^|]+)\|(.+)$', line)
+            if match:
+                try:
+                    start_time = self._parse_timestamp(match.group(2).strip())
+                    end_time = self._parse_timestamp(match.group(3).strip())
+                    text = match.group(4).strip()
+                    
+                    if text and end_time > start_time:
+                        optimized.append({
+                            "start": start_time,
+                            "end": end_time,
+                            "text": text
+                        })
+                except Exception as e:
+                    print(f"解析行失败: {line}, 错误: {e}")
+                    continue
+        
+        # 如果解析失败，返回原始数据
+        if not optimized:
+            print("AI响应解析失败，使用原始字幕")
+            for line in original_lines:
+                parts = line.split('|', 3)
+                if len(parts) == 4:
+                    optimized.append({
+                        "start": self._parse_timestamp(parts[1]),
+                        "end": self._parse_timestamp(parts[2]),
+                        "text": parts[3]
+                    })
+        
+        return optimized
+    
+    def _parse_timestamp(self, ts_str):
+        """解析 SRT 时间戳为秒数"""
+        import re
+        
+        ts_str = ts_str.strip()
+        # 匹配 HH:MM:SS,mmm 或 HH:MM:SS.mmm
+        match = re.match(r'(\d+):(\d+):(\d+)[,.](\d+)', ts_str)
+        if match:
+            hours = int(match.group(1))
+            minutes = int(match.group(2))
+            seconds = int(match.group(3))
+            millis = int(match.group(4))
+            return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
+        
+        # 尝试简单格式 MM:SS,mmm
+        match = re.match(r'(\d+):(\d+)[,.](\d+)', ts_str)
+        if match:
+            minutes = int(match.group(1))
+            seconds = int(match.group(2))
+            millis = int(match.group(3))
+            return minutes * 60 + seconds + millis / 1000.0
+        
+        return 0.0
 
     def _save_as_srt(self, segments, output_path):
         """

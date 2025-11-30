@@ -46,13 +46,23 @@ call .venv\Scripts\activate.bat
 
 :: 升级 pip
 echo [INFO] 升级 pip...
-python -m pip install --upgrade pip -i https://mirrors.aliyun.com/simple
+python -m pip install --upgrade pip -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
 echo.
 
-:: 安装依赖
-echo [INFO] 开始安装依赖包 (使用清华镜像源)...
+:: 先安装 PyTorch GPU 版本 (CUDA 12.1)
+echo [INFO] 安装 PyTorch GPU 版本 (CUDA 12.1)...
+echo [INFO] 从 PyTorch 官方源下载，文件较大请耐心等待...
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+if errorlevel 1 (
+    echo [WARN] PyTorch GPU 安装失败，尝试安装 CPU 版本...
+    pip install torch torchvision torchaudio
+)
+echo.
+
+:: 安装其他依赖
+echo [INFO] 安装其他依赖包 (使用阿里云镜像源)...
 echo ----------------------------------------
-pip install -r video_tool\requirements.txt -i https://mirrors.aliyun.com/simple
+pip install -r video_tool\requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
 echo ----------------------------------------
 echo.
 
@@ -61,7 +71,7 @@ if errorlevel 1 (
     echo.
     echo 可能的解决方案:
     echo 1. 检查网络连接
-    echo 2. 使用国内镜像源: pip install -i https://mirrors.aliyun.com/simple -r video_tool\requirements.txt
+    echo 2. 使用国内镜像源: pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r video_tool\requirements.txt
     echo 3. 手动安装失败的包
     pause
     exit /b 1
@@ -73,7 +83,10 @@ echo   安装完成！
 echo ========================================
 echo.
 echo 已安装的主要包:
-pip list | findstr /i "PyQt6 whisper ffmpeg elevenlabs edge-tts"
+pip list | findstr /i "PyQt6 whisper ffmpeg elevenlabs torch"
+echo.
+echo [INFO] 验证 PyTorch GPU...
+python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}'); print(f'GPU: {torch.cuda.get_device_name(0)}' if torch.cuda.is_available() else 'GPU 不可用')"
 echo.
 echo 提示:
 echo - 双击 run.bat 启动程序

@@ -1,7 +1,8 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QLineEdit, QPushButton, QFileDialog, QGroupBox,
                              QSlider, QDoubleSpinBox, QComboBox,
-                             QSpinBox, QCheckBox, QProgressBar)
+                             QSpinBox, QCheckBox, QProgressBar, QScrollArea,
+                             QFrame)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from .console_widget import console_info, console_error
 import os
@@ -13,15 +14,14 @@ class ComposerThread(QThread):
     progress = pyqtSignal(str)
     
     def __init__(self, video_path, output_path, bgm_path, subtitle_path, 
-                 voice_path, bgm_volume, voice_volume, ffmpeg_path):
+                 voice_tracks, bgm_volume, ffmpeg_path):
         super().__init__()
         self.video_path = video_path
         self.output_path = output_path
         self.bgm_path = bgm_path
         self.subtitle_path = subtitle_path
-        self.voice_path = voice_path
+        self.voice_tracks = voice_tracks  # [(path, volume), ...]
         self.bgm_volume = bgm_volume
-        self.voice_volume = voice_volume
         self.ffmpeg_path = ffmpeg_path
     
     def run(self):
@@ -34,9 +34,8 @@ class ComposerThread(QThread):
                 output_path=self.output_path,
                 bgm_path=self.bgm_path if self.bgm_path else None,
                 subtitle_path=self.subtitle_path if self.subtitle_path else None,
-                voice_path=self.voice_path if self.voice_path else None,
+                voice_tracks=self.voice_tracks,
                 bgm_volume=self.bgm_volume,
-                voice_volume=self.voice_volume,
                 progress_callback=lambda msg: self.progress.emit(msg)
             )
             
@@ -46,9 +45,76 @@ class ComposerThread(QThread):
             self.finished.emit(False, f"错误: {str(e)}\n{traceback.format_exc()}")
 
 
+class VoiceTrackWidget(QFrame):
+    """单个音轨控件"""
+    removed = pyqtSignal(object)
+    
+    def __init__(self, track_num=1, parent=None):
+        super().__init__(parent)
+        self.track_num = track_num
+        self.init_ui()
+    
+    def init_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 5, 0, 5)
+        
+        # 音轨标签
+        self.label = QLabel(f"音轨 {self.track_num}:")
+        self.label.setFixedWidth(60)
+        layout.addWidget(self.label)
+        
+        # 文件路径
+        self.path_edit = QLineEdit()
+        self.path_edit.setPlaceholderText("选择音频文件...")
+        layout.addWidget(self.path_edit)
+        
+        # 浏览按钮
+        self.browse_btn = QPushButton("浏览")
+        self.browse_btn.setFixedWidth(60)
+        self.browse_btn.clicked.connect(self.browse_file)
+        layout.addWidget(self.browse_btn)
+        
+        # 音量
+        layout.addWidget(QLabel("音量:"))
+        self.volume_spin = QDoubleSpinBox()
+        self.volume_spin.setRange(0.0, 2.0)
+        self.volume_spin.setSingleStep(0.1)
+        self.volume_spin.setValue(1.0)
+        self.volume_spin.setFixedWidth(70)
+        layout.addWidget(self.volume_spin)
+        
+        # 删除按钮
+        self.remove_btn = QPushButton("×")
+        self.remove_btn.setFixedWidth(30)
+        self.remove_btn.setToolTip("删除此音轨")
+        self.remove_btn.clicked.connect(lambda: self.removed.emit(self))
+        layout.addWidget(self.remove_btn)
+    
+    def browse_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择音频文件", "",
+            "音频文件 (*.mp3 *.wav *.aac *.flac *.ogg);;所有文件 (*.*)"
+        )
+        if file_path:
+            self.path_edit.setText(file_path)
+    
+    def get_data(self):
+        """获取音轨数据 (path, volume)"""
+        path = self.path_edit.text().strip()
+        if path and os.path.exists(path):
+            return (path, self.volume_spin.value())
+        return None
+    
+    def update_label(self, num):
+        """更新音轨编号"""
+        self.track_num = num
+        self.label.setText(f"音轨 {num}:")
+
+
 class VideoComposerWidget(QWidget):
     def __init__(self):
         super().__init__()
+        self.voice_tracks = []  # 存储音轨控件
         self.init_ui()
         self.thread = None
         
@@ -98,7 +164,6 @@ class VideoComposerWidget(QWidget):
         subtitle_group = QGroupBox("字幕设置 (可选)")
         subtitle_layout = QVBoxLayout()
         
-        # 字幕文件选择
         subtitle_file_layout = QHBoxLayout()
         subtitle_file_layout.addWidget(QLabel("字幕文件:"))
         self.subtitle_edit = QLineEdit()
@@ -114,44 +179,29 @@ class VideoComposerWidget(QWidget):
         subtitle_layout.addLayout(subtitle_file_layout)
         subtitle_group.setLayout(subtitle_layout)
         
-        # 配音文件
-        voice_group = QGroupBox("配音/声音 (可选)")
+        # 配音/声音 - 支持多音轨
+        voice_group = QGroupBox("配音/声音 (可选，支持多音轨)")
         voice_layout = QVBoxLayout()
         
-        voice_file_layout = QHBoxLayout()
-        voice_file_layout.addWidget(QLabel("配音文件:"))
-        self.voice_edit = QLineEdit()
-        self.voice_edit.setPlaceholderText("选择配音文件，留空则保留原声...")
-        self.voice_btn = QPushButton("浏览")
-        self.voice_btn.clicked.connect(self.browse_voice)
-        self.voice_clear_btn = QPushButton("清除")
-        self.voice_clear_btn.clicked.connect(lambda: self.voice_edit.clear())
-        voice_file_layout.addWidget(self.voice_edit)
-        voice_file_layout.addWidget(self.voice_btn)
-        voice_file_layout.addWidget(self.voice_clear_btn)
+        # 音轨容器
+        self.voice_container = QWidget()
+        self.voice_container_layout = QVBoxLayout(self.voice_container)
+        self.voice_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.voice_container_layout.setSpacing(5)
         
-        # 智能选择配音
-        voice_auto_layout = QHBoxLayout()
-        voice_auto_layout.addWidget(QLabel("快速选择:"))
-        self.voice_auto_btn = QPushButton("自动匹配中文配音")
-        self.voice_auto_btn.setToolTip("根据字幕文件自动查找对应的中文配音")
-        self.voice_auto_btn.clicked.connect(self.auto_select_voice)
-        voice_auto_layout.addWidget(self.voice_auto_btn)
-        voice_auto_layout.addStretch()
+        # 添加音轨按钮
+        add_track_layout = QHBoxLayout()
+        self.add_track_btn = QPushButton("+ 添加音轨")
+        self.add_track_btn.clicked.connect(self.add_voice_track)
+        add_track_layout.addWidget(self.add_track_btn)
+        add_track_layout.addStretch()
         
-        voice_vol_layout = QHBoxLayout()
-        voice_vol_layout.addWidget(QLabel("音量:"))
-        self.voice_volume = QDoubleSpinBox()
-        self.voice_volume.setRange(0.0, 2.0)
-        self.voice_volume.setSingleStep(0.1)
-        self.voice_volume.setValue(1.0)
-        voice_vol_layout.addWidget(self.voice_volume)
-        voice_vol_layout.addStretch()
-        
-        voice_layout.addLayout(voice_file_layout)
-        voice_layout.addLayout(voice_auto_layout)
-        voice_layout.addLayout(voice_vol_layout)
+        voice_layout.addWidget(self.voice_container)
+        voice_layout.addLayout(add_track_layout)
         voice_group.setLayout(voice_layout)
+        
+        # 默认添加一个音轨
+        self.add_voice_track()
         
         # 输出设置
         output_group = QGroupBox("输出设置")
@@ -184,6 +234,39 @@ class VideoComposerWidget(QWidget):
         layout.addWidget(self.progress_bar)
         layout.addStretch()
     
+    def add_voice_track(self):
+        """添加一个音轨"""
+        track_num = len(self.voice_tracks) + 1
+        track_widget = VoiceTrackWidget(track_num)
+        track_widget.removed.connect(self.remove_voice_track)
+        
+        self.voice_tracks.append(track_widget)
+        self.voice_container_layout.addWidget(track_widget)
+        
+        # 如果只有一个音轨，隐藏删除按钮
+        self.update_remove_buttons()
+    
+    def remove_voice_track(self, track_widget):
+        """删除一个音轨"""
+        if track_widget in self.voice_tracks:
+            self.voice_tracks.remove(track_widget)
+            self.voice_container_layout.removeWidget(track_widget)
+            track_widget.deleteLater()
+            
+            # 更新编号
+            for i, track in enumerate(self.voice_tracks):
+                track.update_label(i + 1)
+            
+            self.update_remove_buttons()
+    
+    def update_remove_buttons(self):
+        """更新删除按钮的可见性"""
+        # 至少保留一个音轨时，隐藏删除按钮
+        show_remove = len(self.voice_tracks) > 1
+        for track in self.voice_tracks:
+            track.remove_btn.setVisible(show_remove)
+
+    
     def browse_video(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "选择视频文件", "",
@@ -191,7 +274,6 @@ class VideoComposerWidget(QWidget):
         )
         if file_path:
             self.video_edit.setText(file_path)
-            # 自动设置输出路径
             if not self.output_edit.text():
                 base_name = os.path.splitext(file_path)[0]
                 self.output_edit.setText(f"{base_name}_处理完成.mp4")
@@ -212,47 +294,6 @@ class VideoComposerWidget(QWidget):
         if file_path:
             self.subtitle_edit.setText(file_path)
     
-    def auto_select_voice(self):
-        """自动匹配中文配音文件"""
-        subtitle_path = self.subtitle_edit.text().strip()
-        if not subtitle_path:
-            self.log("请先选择字幕文件")
-            return
-        
-        # 尝试查找对应的中文配音
-        base_path = os.path.splitext(subtitle_path)[0]
-        
-        # 移除可能的语言后缀
-        for suffix in ["_中文", "_英文", "_双语", "_en", "_zh"]:
-            if base_path.endswith(suffix):
-                base_path = base_path[:-len(suffix)]
-                break
-        
-        # 尝试多个可能的配音文件名
-        possible_names = [
-            f"{base_path}_中文.mp3",
-            f"{base_path}_中文.wav",
-            f"{base_path}_zh.mp3",
-            f"{base_path}_chinese.mp3",
-        ]
-        
-        for voice_file in possible_names:
-            if os.path.exists(voice_file):
-                self.voice_edit.setText(voice_file)
-                self.log(f"✓ 自动匹配到配音: {os.path.basename(voice_file)}")
-                return
-        
-        self.log("未找到匹配的中文配音文件")
-        self.log(f"提示: 配音文件应命名为 {os.path.basename(base_path)}_中文.mp3")
-    
-    def browse_voice(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "选择配音文件", "",
-            "音频文件 (*.mp3 *.wav *.aac *.flac *.ogg);;所有文件 (*.*)"
-        )
-        if file_path:
-            self.voice_edit.setText(file_path)
-    
     def browse_output(self):
         file_path, _ = QFileDialog.getSaveFileName(
             self, "保存视频", "",
@@ -260,6 +301,15 @@ class VideoComposerWidget(QWidget):
         )
         if file_path:
             self.output_edit.setText(file_path)
+    
+    def get_voice_tracks(self):
+        """获取所有有效的音轨数据"""
+        tracks = []
+        for track in self.voice_tracks:
+            data = track.get_data()
+            if data:
+                tracks.append(data)
+        return tracks
     
     def start_compose(self):
         video_path = self.video_edit.text().strip()
@@ -272,7 +322,6 @@ class VideoComposerWidget(QWidget):
             self.log("视频文件不存在")
             return
         
-        # 获取输出路径
         output_path = self.output_edit.text().strip()
         if not output_path:
             base_name = os.path.splitext(video_path)[0]
@@ -285,15 +334,15 @@ class VideoComposerWidget(QWidget):
         self.log("开始视频合成...")
         
         ffmpeg_path = self.get_ffmpeg_path()
+        voice_tracks = self.get_voice_tracks()
         
         self.thread = ComposerThread(
             video_path=video_path,
             output_path=output_path,
             bgm_path=self.bgm_edit.text().strip(),
             subtitle_path=self.subtitle_edit.text().strip(),
-            voice_path=self.voice_edit.text().strip(),
+            voice_tracks=voice_tracks,
             bgm_volume=self.bgm_volume.value(),
-            voice_volume=self.voice_volume.value(),
             ffmpeg_path=ffmpeg_path
         )
         self.thread.progress.connect(self.log)
@@ -312,10 +361,5 @@ class VideoComposerWidget(QWidget):
         console_info(message, "视频合成")
     
     def get_ffmpeg_path(self):
-        import json
-        try:
-            with open("config.json", "r") as f:
-                config = json.load(f)
-                return config.get("ffmpeg_path", "ffmpeg")
-        except:
-            return "ffmpeg"
+        from video_tool.utils import get_ffmpeg_path
+        return get_ffmpeg_path()

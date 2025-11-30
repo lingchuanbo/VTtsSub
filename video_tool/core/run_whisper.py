@@ -30,10 +30,11 @@ def main():
         # Load model
         model = whisper.load_model(args.model, download_root=args.model_dir, device=device)
         
-        # Transcribe
+        # Transcribe with word-level timestamps for precise timing
         result = model.transcribe(
             args.audio_path,
-            language=args.language if args.language and args.language != "None" else None
+            language=args.language if args.language and args.language != "None" else None,
+            word_timestamps=True  # 启用词级时间戳，让字幕与语音精确同步
         )
         
         # Output result as JSON

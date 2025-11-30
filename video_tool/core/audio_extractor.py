@@ -103,6 +103,13 @@ class DemucsProcessor:
         try:
             import torch
             import torchaudio
+            
+            # 确保 soundfile 后端可用
+            try:
+                import soundfile
+            except ImportError:
+                raise ImportError("请安装 soundfile: pip install soundfile")
+            
             from demucs.pretrained import get_model
             from demucs.apply import apply_model
             

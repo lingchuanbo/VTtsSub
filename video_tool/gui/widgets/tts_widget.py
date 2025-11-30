@@ -20,7 +20,8 @@ class TTSThread(QThread):
     
     def __init__(self, srt_path, output_dir, voice, engine_type, api_key=None, 
                  model_id=None, language_type="Chinese", api_url=None, speed=1.0, threads=1,
-                 auto_truncate=False, subtitles=None, auto_speed=False):
+                 auto_truncate=False, subtitles=None, auto_speed=False, request_interval=0,
+                 standard_speed=1.2, char_time_ms=250, max_speed=2.5):
         super().__init__()
         self.srt_path = srt_path
         self.output_dir = output_dir
@@ -35,6 +36,10 @@ class TTSThread(QThread):
         self.auto_truncate = auto_truncate
         self.subtitles_data = subtitles  # For truncation timing
         self.auto_speed = auto_speed  # 根据字幕时间自动调整语速
+        self.request_interval = request_interval  # 请求间隔（秒）
+        self.standard_speed = standard_speed  # 标准语速
+        self.char_time_ms = char_time_ms  # 每字符时间（毫秒）
+        self.max_speed = max_speed  # 最大语速
         self.progress_lock = threading.Lock()
         self.completed_count = 0
         self.error_occurred = False
@@ -92,12 +97,13 @@ class TTSThread(QThread):
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=False,  # 使用 bytes 避免编码错误
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         )
         
         if result.returncode != 0:
-            self.log.emit(f"ffmpeg 输出: {result.stderr[:300] if result.stderr else ''}")
+            stderr = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ''
+            self.log.emit(f"ffmpeg 输出: {stderr[:300]}")
         
         return output_file
     
@@ -148,6 +154,17 @@ class TTSThread(QThread):
                 self.log.emit(f"{'序号':<6}{'字幕时长':<12}{'文字数':<8}{'计算语速':<10}{'文本预览'}")
                 self.log.emit("-" * 50)
             
+            # 预处理：获取所有字幕的时间信息
+            subtitle_times = []
+            for sub in subtitles:
+                time_range = sub['time_range']
+                times = time_range.split('-->')
+                start_time_str = times[0].strip()
+                end_time_str = times[1].strip() if len(times) > 1 else start_time_str
+                start_ms = self.parse_srt_time(start_time_str)
+                end_ms = self.parse_srt_time(end_time_str)
+                subtitle_times.append((start_ms, end_ms))
+            
             for i, sub in enumerate(subtitles):
                 text = sub['text'].strip()
                 if not text:
@@ -157,39 +174,58 @@ class TTSThread(QThread):
                 if self.missing_indices is not None and i not in self.missing_indices:
                     continue
                 
-                time_range = sub['time_range']
-                times = time_range.split('-->')
-                start_time_str = times[0].strip()
-                end_time_str = times[1].strip() if len(times) > 1 else start_time_str
-                start_ms = self.parse_srt_time(start_time_str)
-                end_ms = self.parse_srt_time(end_time_str)
+                start_ms, end_ms = subtitle_times[i]
                 duration_ms = end_ms - start_ms
+                
+                # 计算可用时间：当前字幕时长 + 到下一句的间隔
+                available_ms = duration_ms
+                gap_ms = 0
+                if i + 1 < len(subtitle_times):
+                    next_start_ms = subtitle_times[i + 1][0]
+                    gap_ms = next_start_ms - end_ms
+                    if gap_ms > 0:
+                        available_ms = duration_ms + gap_ms
+                
                 output_file = os.path.join(self.output_dir, f"{i+1:03d}.mp3")
                 
                 # 计算自动语速
                 calculated_speed = self.speed  # 默认使用全局语速
                 if self.auto_speed and duration_ms > 0:
-                    # 估算：中文约每秒4-5个字，英文约每秒3-4个词
-                    # 基准：1.0语速下，中文约每秒4个字
-                    char_count = len(text.replace('\n', '').replace(' ', ''))
-                    # 基准时间：每个字符约250ms (1.0语速)
-                    base_time_ms = char_count * 250
+                    # 使用配置的参数
+                    standard_speed = self.standard_speed
+                    char_time_ms = self.char_time_ms
+                    max_speed = self.max_speed
                     
-                    if base_time_ms > 0:
-                        # 计算需要的语速：如果基准时间 > 字幕时长，需要加快
-                        calculated_speed = base_time_ms / duration_ms
-                        # 限制语速范围 0.5 - 2.5
-                        calculated_speed = max(0.5, min(2.5, calculated_speed))
+                    # 计算标准语速下每字符需要的时间
+                    # 例如：1.0语速下250ms，1.2语速下约208ms
+                    standard_char_time = char_time_ms / standard_speed
+                    
+                    char_count = len(text.replace('\n', '').replace(' ', ''))
+                    # 标准语速下需要的时间
+                    standard_time_ms = char_count * standard_char_time
+                    
+                    if standard_time_ms <= available_ms:
+                        # 可用时间足够（包含间隔），使用标准语速
+                        calculated_speed = standard_speed
+                    else:
+                        # 时间不够，需要加速
+                        # 计算需要的语速：基于1.0语速的基准时间
+                        base_time_ms = char_count * char_time_ms
+                        calculated_speed = base_time_ms / available_ms
+                        # 限制最大语速
+                        calculated_speed = min(max_speed, calculated_speed)
                     
                     duration_sec = duration_ms / 1000
                     text_preview = text[:20].replace('\n', ' ') + ('...' if len(text) > 20 else '')
-                    self.log.emit(f"{i+1:<6}{duration_sec:.2f}s{'':<6}{char_count:<8}{calculated_speed:.2f}x{'':<5}{text_preview}")
+                    status = "标准" if calculated_speed == standard_speed else "加速"
+                    gap_info = f"+{gap_ms/1000:.1f}s" if gap_ms > 0 else ""
+                    self.log.emit(f"{i+1:<6}{duration_sec:.2f}s{gap_info:<6}{char_count:<8}{calculated_speed:.2f}x ({status}){'':<2}{text_preview}")
                 
                 tasks.append({
                     'index': i,
                     'text': text,
                     'start_ms': start_ms,
-                    'duration_ms': duration_ms,
+                    'duration_ms': available_ms,  # 使用可用时间（包含间隔）
                     'output_file': output_file,
                     'speed': calculated_speed
                 })
@@ -208,10 +244,15 @@ class TTSThread(QThread):
             
             def generate_single(task, retry_count=0):
                 """Generate single audio with retry support."""
+                import time
                 max_retries = 2
                 task_speed = task.get('speed', self.speed)
                 
                 try:
+                    # TTSFM 请求间隔
+                    if self.engine_type == "ttsfm" and self.request_interval > 0:
+                        time.sleep(self.request_interval)
+                    
                     engine.generate_audio(task['text'], task['output_file'], 
                                         self.voice, self.model_id, self.language_type, task_speed)
                     
@@ -230,7 +271,6 @@ class TTSThread(QThread):
                     # Retry logic
                     if retry_count < max_retries:
                         self.log.emit(f"正在重试第{task['index']+1}条...")
-                        import time
                         time.sleep(1)
                         return generate_single(task, retry_count + 1)
                     else:
@@ -445,17 +485,19 @@ class MergeThread(QThread):
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
+                text=False,  # 使用 bytes 避免编码错误
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
             
             if result.returncode != 0:
-                self.log.emit(f"ffmpeg: {result.stderr[:200] if result.stderr else ''}")
+                stderr = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ''
+                self.log.emit(f"ffmpeg: {stderr[:200]}")
             
             if os.path.exists(output_file):
                 self.finished.emit(True, f"合成完成!\n保存至: {output_file}")
             else:
-                self.finished.emit(False, f"合成失败: {result.stderr[:200] if result.stderr else 'unknown'}")
+                stderr = result.stderr.decode('utf-8', errors='ignore') if result.stderr else 'unknown'
+                self.finished.emit(False, f"合成失败: {stderr[:200]}")
                 
         except Exception as e:
             self.finished.emit(False, f"错误: {str(e)}")
@@ -566,6 +608,39 @@ class TTSWidget(QWidget):
         auto_speed_layout.addWidget(self.auto_speed_checkbox)
         auto_speed_layout.addStretch()
         
+        # 自动语速参数
+        auto_speed_params_layout = QHBoxLayout()
+        auto_speed_params_layout.addWidget(QLabel("标准语速:"))
+        self.standard_speed_spin = QDoubleSpinBox()
+        self.standard_speed_spin.setRange(0.8, 2.0)
+        self.standard_speed_spin.setSingleStep(0.1)
+        self.standard_speed_spin.setValue(1.2)
+        self.standard_speed_spin.setDecimals(1)
+        self.standard_speed_spin.setToolTip("时间足够时使用的语速")
+        self.standard_speed_spin.valueChanged.connect(self.save_settings)
+        auto_speed_params_layout.addWidget(self.standard_speed_spin)
+        
+        auto_speed_params_layout.addWidget(QLabel("每字时间:"))
+        self.char_time_spin = QSpinBox()
+        self.char_time_spin.setRange(150, 400)
+        self.char_time_spin.setSingleStep(10)
+        self.char_time_spin.setValue(250)
+        self.char_time_spin.setSuffix(" ms")
+        self.char_time_spin.setToolTip("1.0语速下每个字符需要的时间(毫秒)，用于计算加速比例")
+        self.char_time_spin.valueChanged.connect(self.save_settings)
+        auto_speed_params_layout.addWidget(self.char_time_spin)
+        
+        auto_speed_params_layout.addWidget(QLabel("最大语速:"))
+        self.max_speed_spin = QDoubleSpinBox()
+        self.max_speed_spin.setRange(1.5, 4.0)
+        self.max_speed_spin.setSingleStep(0.1)
+        self.max_speed_spin.setValue(2.5)
+        self.max_speed_spin.setDecimals(1)
+        self.max_speed_spin.setToolTip("自动加速时的最大语速限制")
+        self.max_speed_spin.valueChanged.connect(self.save_settings)
+        auto_speed_params_layout.addWidget(self.max_speed_spin)
+        auto_speed_params_layout.addStretch()
+        
         # 线程数控制
         threads_layout = QHBoxLayout()
         threads_layout.addWidget(QLabel("并行线程:"))
@@ -577,11 +652,28 @@ class TTSWidget(QWidget):
         threads_layout.addWidget(QLabel("(1-10, 建议3-5)"))
         threads_layout.addStretch()
         
+        # 请求间隔（TTSFM）
+        interval_layout = QHBoxLayout()
+        interval_layout.addWidget(QLabel("请求间隔:"))
+        self.interval_spin = QDoubleSpinBox()
+        self.interval_spin.setRange(0, 30)
+        self.interval_spin.setSingleStep(0.5)
+        self.interval_spin.setValue(3.0)
+        self.interval_spin.setDecimals(1)
+        self.interval_spin.setSuffix(" 秒")
+        self.interval_spin.setToolTip("TTSFM 每次请求之间的等待时间，避免请求过快")
+        self.interval_spin.valueChanged.connect(self.save_settings)
+        interval_layout.addWidget(self.interval_spin)
+        interval_layout.addWidget(QLabel("(仅 TTSFM, 0=无间隔)"))
+        interval_layout.addStretch()
+        
         voice_layout.addLayout(voice_select_layout)
         voice_layout.addLayout(model_layout)
         voice_layout.addLayout(speed_layout)
         voice_layout.addLayout(auto_speed_layout)
+        voice_layout.addLayout(auto_speed_params_layout)
         voice_layout.addLayout(threads_layout)
+        voice_layout.addLayout(interval_layout)
         voice_group.setLayout(voice_layout)
         
         # 操作
@@ -707,6 +799,10 @@ class TTSWidget(QWidget):
                 self.speed_spin.setValue(config.get("speed", 1.0))
                 self.threads_spin.setValue(config.get("threads", 3))
                 self.auto_speed_checkbox.setChecked(config.get("auto_speed", False))
+                self.interval_spin.setValue(config.get("request_interval", 3.0))
+                self.standard_speed_spin.setValue(config.get("standard_speed", 1.2))
+                self.char_time_spin.setValue(config.get("char_time_ms", 250))
+                self.max_speed_spin.setValue(config.get("max_speed", 2.5))
                 
                 voice = config.get("voice", "")
                 if voice:
@@ -735,7 +831,11 @@ class TTSWidget(QWidget):
             "voice": self.voice_combo.currentText(),
             "speed": self.speed_spin.value(),
             "threads": self.threads_spin.value(),
-            "auto_speed": self.auto_speed_checkbox.isChecked()
+            "auto_speed": self.auto_speed_checkbox.isChecked(),
+            "request_interval": self.interval_spin.value(),
+            "standard_speed": self.standard_speed_spin.value(),
+            "char_time_ms": self.char_time_spin.value(),
+            "max_speed": self.max_speed_spin.value()
         }
         
         try:
@@ -841,17 +941,24 @@ class TTSWidget(QWidget):
         speed = self.speed_spin.value()
         threads = self.threads_spin.value()
         auto_speed = self.auto_speed_checkbox.isChecked()
+        request_interval = self.interval_spin.value()
+        standard_speed = self.standard_speed_spin.value()
+        char_time_ms = self.char_time_spin.value()
+        max_speed = self.max_speed_spin.value()
         
         if auto_speed:
-            self.log(f"语速: 自动 (根据字幕时间调整)")
+            self.log(f"语速: 自动 (标准:{standard_speed}x, 每字:{char_time_ms}ms, 最大:{max_speed}x)")
         else:
             self.log(f"语速: {speed}")
         self.log(f"并行线程: {threads}")
+        if engine_type == "ttsfm" and request_interval > 0:
+            self.log(f"请求间隔: {request_interval} 秒")
         
         self.thread = TTSThread(
             srt_path, output_dir, voice, engine_type, 
             api_key, model_id, "Chinese", api_url, speed, threads,
-            auto_speed=auto_speed
+            auto_speed=auto_speed, request_interval=request_interval,
+            standard_speed=standard_speed, char_time_ms=char_time_ms, max_speed=max_speed
         )
         self.thread.progress.connect(self.on_progress)
         self.thread.log.connect(self.log)
@@ -923,6 +1030,10 @@ class TTSWidget(QWidget):
         speed = self.speed_spin.value()
         threads = self.threads_spin.value()
         auto_speed = self.auto_speed_checkbox.isChecked()
+        request_interval = self.interval_spin.value()
+        standard_speed = self.standard_speed_spin.value()
+        char_time_ms = self.char_time_spin.value()
+        max_speed = self.max_speed_spin.value()
         
         self.set_buttons_enabled(False)
         self.progress_bar.setVisible(True)
@@ -932,13 +1043,17 @@ class TTSWidget(QWidget):
         self.log(f"引擎: {engine_text}")
         self.log(f"并行线程: {threads}")
         if auto_speed:
-            self.log(f"语速: 自动 (根据字幕时间调整)")
+            self.log(f"语速: 自动 (标准:{standard_speed}x, 每字:{char_time_ms}ms, 最大:{max_speed}x)")
+        if engine_type == "ttsfm" and request_interval > 0:
+            self.log(f"请求间隔: {request_interval} 秒")
         
         # Create a custom thread for partial regeneration
         self.thread = TTSThread(
             srt_path, output_dir, voice, engine_type, 
             api_key, model_id, "Chinese", api_url, speed, threads,
-            auto_truncate=False, subtitles=subtitles, auto_speed=auto_speed
+            auto_truncate=False, subtitles=subtitles, auto_speed=auto_speed,
+            request_interval=request_interval,
+            standard_speed=standard_speed, char_time_ms=char_time_ms, max_speed=max_speed
         )
         # Override to only process missing indices
         self.thread.missing_indices = missing_indices

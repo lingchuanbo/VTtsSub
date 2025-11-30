@@ -284,37 +284,87 @@ class VideoComposer:
 
 
     def compose_advanced(self, video_path, output_path, 
-                        bgm_path=None, subtitle_path=None, voice_path=None,
-                        bgm_volume=0.3, voice_volume=1.0,
+                        bgm_path=None, subtitle_path=None, 
+                        voice_path=None, voice_volume=1.0,  # 兼容旧接口
+                        voice_tracks=None,  # 新接口：[(path, volume), ...]
+                        bgm_volume=0.3,
                         subtitle_config=None,
                         progress_callback=None):
         """
-        高级合成方法，支持字幕样式配置
+        高级合成方法，支持字幕样式配置和多音轨
+        
+        Args:
+            voice_tracks: 音轨列表 [(path, volume), ...]，支持多个音频混合
+            voice_path: 单个配音路径（兼容旧接口）
+            voice_volume: 单个配音音量（兼容旧接口）
         """
         temp_files = []
-        temp_ass_files = []  # 临时 ASS 文件
+        temp_ass_files = []
         current_video = video_path
         subtitle_config = subtitle_config or {}
         
+        # 兼容旧接口：如果没有 voice_tracks 但有 voice_path
+        if not voice_tracks and voice_path:
+            voice_tracks = [(voice_path, voice_volume)]
+        
+        # 过滤有效的音轨
+        valid_tracks = []
+        if voice_tracks:
+            for track in voice_tracks:
+                if track and len(track) >= 2 and track[0] and os.path.exists(track[0]):
+                    valid_tracks.append(track)
+        
         try:
-            # 步骤1: 添加配音（替换原音轨）
-            if voice_path and os.path.exists(voice_path):
+            # 步骤1: 添加配音（支持多音轨混合）
+            if valid_tracks:
                 if progress_callback:
-                    progress_callback("步骤: 添加配音...")
+                    progress_callback(f"步骤: 添加配音 ({len(valid_tracks)} 个音轨)...")
                 
                 temp_voice = tempfile.mktemp(suffix=".mp4")
                 temp_files.append(temp_voice)
                 
-                cmd = [
-                    self.ffmpeg_path, "-y",
-                    "-i", current_video,
-                    "-i", voice_path,
-                    "-c:v", "copy",
-                    "-map", "0:v:0",
-                    "-map", "1:a:0",
-                    "-shortest",
-                    temp_voice
-                ]
+                if len(valid_tracks) == 1:
+                    # 单音轨
+                    voice_path, voice_vol = valid_tracks[0]
+                    cmd = [
+                        self.ffmpeg_path, "-y",
+                        "-i", current_video,
+                        "-i", voice_path,
+                        "-filter_complex", f"[1:a]volume={voice_vol}[aout]",
+                        "-c:v", "copy",
+                        "-map", "0:v:0",
+                        "-map", "[aout]",
+                        "-shortest",
+                        temp_voice
+                    ]
+                else:
+                    # 多音轨混合
+                    cmd = [self.ffmpeg_path, "-y", "-i", current_video]
+                    
+                    # 添加所有音频输入
+                    for path, _ in valid_tracks:
+                        cmd.extend(["-i", path])
+                    
+                    # 构建混音滤镜
+                    filter_parts = []
+                    for i, (_, vol) in enumerate(valid_tracks):
+                        filter_parts.append(f"[{i+1}:a]volume={vol}[a{i}]")
+                    
+                    # 混合所有音轨
+                    mix_inputs = "".join(f"[a{i}]" for i in range(len(valid_tracks)))
+                    filter_parts.append(f"{mix_inputs}amix=inputs={len(valid_tracks)}:duration=longest[aout]")
+                    
+                    filter_complex = ";".join(filter_parts)
+                    
+                    cmd.extend([
+                        "-filter_complex", filter_complex,
+                        "-c:v", "copy",
+                        "-map", "0:v:0",
+                        "-map", "[aout]",
+                        "-shortest",
+                        temp_voice
+                    ])
+                
                 subprocess.run(cmd, check=True, capture_output=True,
                              encoding='utf-8', errors='ignore')
                 current_video = temp_voice

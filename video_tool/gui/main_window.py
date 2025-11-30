@@ -8,7 +8,7 @@ from .config_dialog import ConfigDialog
 from .widgets import (AudioExtractorWidget, ASRWidget, SubtitleWidget, 
                      TTSWidget, TranscoderWidget, VideoComposerWidget,
                      ConsoleWindow, console_info)
-from .styles import MODERN_DARK_THEME
+from .styles import THEMES, get_theme_style, DARK_THEME
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -105,6 +105,19 @@ class MainWindow(QMainWindow):
         
         self.exit_action = QAction("退出", self)
         self.exit_action.triggered.connect(self.close)
+        
+        # 主题切换动作
+        self.theme_actions = {}
+        self.theme_group = QButtonGroup(self)
+        for theme_key, theme_name in THEMES.items():
+            action = QAction(theme_name, self)
+            action.setCheckable(True)
+            action.setData(theme_key)
+            action.triggered.connect(lambda checked, key=theme_key: self.change_theme(key))
+            self.theme_actions[theme_key] = action
+        # 默认选中深色主题
+        self.theme_actions["dark"].setChecked(True)
+        self.current_theme = "dark"
 
     def _create_menu(self):
         menu_bar = self.menuBar()
@@ -118,6 +131,12 @@ class MainWindow(QMainWindow):
         # View Menu
         view_menu = menu_bar.addMenu("视图")
         view_menu.addAction(self.console_action)
+        view_menu.addSeparator()
+        
+        # 主题子菜单
+        theme_menu = view_menu.addMenu("主题")
+        for action in self.theme_actions.values():
+            theme_menu.addAction(action)
 
     def open_config(self):
         dialog = ConfigDialog(self)
@@ -132,6 +151,21 @@ class MainWindow(QMainWindow):
         else:
             self.console_window.hide()
     
+    def change_theme(self, theme_key):
+        """切换主题"""
+        if theme_key == self.current_theme:
+            return
+        
+        # 更新选中状态
+        for key, action in self.theme_actions.items():
+            action.setChecked(key == theme_key)
+        
+        # 应用新主题
+        self.current_theme = theme_key
+        app = QApplication.instance()
+        app.setStyleSheet(get_theme_style(theme_key))
+        console_info(f"已切换到{THEMES[theme_key]}", "System")
+    
     def _on_console_closed(self):
         """控制台窗口关闭时更新菜单状态"""
         self.console_action.setChecked(False)
@@ -143,7 +177,7 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyleSheet(MODERN_DARK_THEME)
+    app.setStyleSheet(DARK_THEME)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

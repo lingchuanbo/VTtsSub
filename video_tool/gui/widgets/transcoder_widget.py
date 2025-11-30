@@ -162,10 +162,5 @@ class TranscoderWidget(QWidget):
         console_info(message, "视频转码")
     
     def get_ffmpeg_path(self):
-        import json
-        try:
-            with open("config.json", "r") as f:
-                config = json.load(f)
-                return config.get("ffmpeg_path", "ffmpeg")
-        except:
-            return "ffmpeg"
+        from video_tool.utils import get_ffmpeg_path
+        return get_ffmpeg_path()

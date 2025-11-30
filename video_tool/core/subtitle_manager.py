@@ -21,6 +21,7 @@ class SubtitleManager:
         self.api_url = api_url or "https://api.deepseek.com/v1/chat/completions"
         self.model = "deepseek-chat"
         self.thread_count = 3  # Default thread count
+        self.request_interval = 2.0  # 请求间隔（秒）
         self._lock = threading.Lock()
 
     def parse_srt(self, srt_path):
@@ -70,6 +71,10 @@ class SubtitleManager:
     def set_thread_count(self, count):
         """Set the number of concurrent translation threads."""
         self.thread_count = max(1, min(count, 10))  # Limit between 1-10
+    
+    def set_request_interval(self, interval):
+        """Set the interval between API requests (in seconds)."""
+        self.request_interval = max(0, interval)
 
     def translate_subtitles(self, subtitles, target_lang="zh", prompt_text=None, progress_callback=None):
         """
@@ -106,10 +111,15 @@ class SubtitleManager:
         
         def translate_batch_worker(batch_index, batch, retry_count=0):
             """Worker function for translating a batch with retry support."""
+            import time
             batch_texts = [sub['text'] for sub in batch]
             max_retries = 2
             
             try:
+                # 请求间隔
+                if self.request_interval > 0:
+                    time.sleep(self.request_interval)
+                
                 if self.engine_type == "deeplx":
                     translated_texts = self._translate_deeplx(batch_texts, target_lang)
                 else:
@@ -256,9 +266,19 @@ class SubtitleManager:
             lang_name = "中文" if target_lang == "zh" else "English"
             system_prompt = f"你是一个专业的字幕翻译器。请将以下字幕翻译成{lang_name}。保持原有的语气和风格，翻译要自然流畅。只返回翻译结果，每行对应一条字幕，不要添加序号或其他内容。"
         
-        # Format input texts
+        # 强调格式要求的提示
+        format_instruction = f"""
+重要格式要求：
+- 输入共 {len(texts)} 条字幕，你必须输出恰好 {len(texts)} 行翻译
+- 每行翻译对应一条原文，按顺序一一对应
+- 使用 "1. 翻译内容" 的格式，序号必须从1到{len(texts)}
+- 不要合并、拆分或跳过任何一条
+- 如果某条原文很短或是语气词，也要单独翻译成一行
+"""
+        
+        # Format input texts with clear numbering
         numbered_texts = "\n".join([f"{i+1}. {text}" for i, text in enumerate(texts)])
-        user_message = f"请翻译以下{len(texts)}条字幕：\n\n{numbered_texts}"
+        user_message = f"请翻译以下 {len(texts)} 条字幕（必须输出 {len(texts)} 行）：\n\n{numbered_texts}\n\n{format_instruction}"
         
         # Call API
         headers = {
@@ -288,20 +308,60 @@ class SubtitleManager:
         result = response.json()
         content = result['choices'][0]['message']['content']
         
-        # Parse response - split by newlines and clean up
+        # 解析响应 - 优先按序号匹配
+        translated = self._parse_numbered_response(content, len(texts))
+        
+        # 验证数量
+        if len(translated) != len(texts):
+            print(f"警告: 翻译结果数量不匹配 (期望 {len(texts)}, 实际 {len(translated)})")
+            print(f"原始响应:\n{content[:500]}...")
+            
+            # 尝试修复
+            while len(translated) < len(texts):
+                idx = len(translated)
+                print(f"  补充第 {idx+1} 条: 使用原文")
+                translated.append(texts[idx])
+        
+        return translated[:len(texts)]
+    
+    def _parse_numbered_response(self, content, expected_count):
+        """
+        解析带序号的翻译响应，确保按序号正确匹配
+        """
         lines = content.strip().split('\n')
+        
+        # 方法1: 尝试按序号提取
+        numbered_results = {}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # 匹配 "1. xxx" 或 "1、xxx" 或 "1: xxx" 格式
+            match = re.match(r'^(\d+)[\.\、\:\s]+(.+)$', line)
+            if match:
+                num = int(match.group(1))
+                text = match.group(2).strip()
+                if 1 <= num <= expected_count and text:
+                    numbered_results[num] = text
+        
+        # 如果按序号提取成功且数量正确
+        if len(numbered_results) == expected_count:
+            return [numbered_results[i] for i in range(1, expected_count + 1)]
+        
+        # 方法2: 如果序号提取不完整，按行顺序提取
         translated = []
         for line in lines:
-            # Remove numbering if present (e.g., "1. ", "1、", "1: ")
-            cleaned = re.sub(r'^\d+[\.\、\:\s]+', '', line.strip())
+            line = line.strip()
+            if not line:
+                continue
+            
+            # 移除可能的序号前缀
+            cleaned = re.sub(r'^\d+[\.\、\:\s]+', '', line)
             if cleaned:
                 translated.append(cleaned)
         
-        # Ensure we have the same number of translations
-        while len(translated) < len(texts):
-            translated.append(texts[len(translated)])  # Fallback to original
-        
-        return translated[:len(texts)]
+        return translated
 
     def _mock_translate(self, text, target_lang):
         """Mock translation for testing (when no API key)."""

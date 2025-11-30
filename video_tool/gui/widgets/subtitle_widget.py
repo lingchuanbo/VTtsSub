@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QLineEdit, QPushButton, QFileDialog, QTextEdit,
                              QGroupBox, QComboBox, QProgressBar, QSpinBox,
-                             QFontComboBox, QFrame, QSplitter, QScrollArea)
+                             QDoubleSpinBox, QFontComboBox, QFrame, QSplitter, QScrollArea)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QFont, QColor, QTextCharFormat, QPainter, QPen, QBrush
 from .console_widget import console_info, console_error, console_warning
@@ -352,6 +352,18 @@ class SubtitleWidget(QWidget):
         self.thread_count_combo.setToolTip("同时翻译的字幕数量，数值越大速度越快但可能触发API限流")
         translate_layout.addWidget(self.thread_count_combo)
         
+        translate_layout.addWidget(QLabel("间隔:"))
+        self.interval_spin = QDoubleSpinBox()
+        self.interval_spin.setRange(0, 30)
+        self.interval_spin.setSingleStep(0.5)
+        self.interval_spin.setValue(2.0)
+        self.interval_spin.setDecimals(1)
+        self.interval_spin.setSuffix(" 秒")
+        self.interval_spin.setToolTip("每次翻译请求之间的等待时间，避免触发API限流")
+        self.interval_spin.setFixedWidth(80)
+        self.interval_spin.valueChanged.connect(self.save_settings)
+        translate_layout.addWidget(self.interval_spin)
+        
         self.translate_btn = QPushButton("开始翻译并保存")
         self.translate_btn.clicked.connect(self.translate_and_save)
         translate_layout.addWidget(self.translate_btn)
@@ -430,6 +442,7 @@ class SubtitleWidget(QWidget):
                 self.api_url_edit.setText(config.get("api_url", "https://api.deepseek.com/v1/chat/completions"))
                 self.api_key_edit.setText(config.get("api_key", ""))
                 self.model_edit.setText(config.get("model", "deepseek-chat"))
+                self.interval_spin.setValue(config.get("request_interval", 2.0))
                 
                 # 加载字幕样式设置
                 style = config.get("style", {})
@@ -466,6 +479,7 @@ class SubtitleWidget(QWidget):
             "api_url": self.api_url_edit.text(),
             "api_key": self.api_key_edit.text(),
             "model": self.model_edit.text(),
+            "request_interval": self.interval_spin.value(),
             "style": {
                 "cn_font": self.cn_font_combo.currentFont().family(),
                 "cn_size": self.cn_size_spin.value(),
@@ -605,7 +619,9 @@ class SubtitleWidget(QWidget):
         try:
             self._init_manager()
             thread_count = int(self.thread_count_combo.currentText())
+            request_interval = self.interval_spin.value()
             self.manager.set_thread_count(thread_count)
+            self.manager.set_request_interval(request_interval)
             
             self.log(f"加载字幕文件: {file_path}")
             self.current_subtitles = self.manager.parse_srt(file_path)
@@ -624,10 +640,13 @@ class SubtitleWidget(QWidget):
         self.progress_bar.setValue(0)
         
         engine_name = self.engine_combo.currentText()
+        request_interval = self.interval_spin.value()
         thread_count = int(self.thread_count_combo.currentText())
         self.log(f"使用引擎: {engine_name}")
         self.log(f"目标语言: {lang_text}")
         self.log(f"并发数: {thread_count}")
+        if request_interval > 0:
+            self.log(f"请求间隔: {request_interval} 秒")
         
         self.translate_thread = TranslateThread(
             self.manager, 
