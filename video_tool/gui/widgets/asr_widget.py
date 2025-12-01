@@ -14,8 +14,7 @@ class ASRThread(QThread):
     def __init__(self, audio_path, output_path, model_size, engine_type, api_key=None, 
                  language_code=None, diarize=False, api_url=None,
                  pause_threshold=0.5, max_words_per_segment=12,
-                 ai_optimize=False, optimize_level="medium",
-                 ai_api_key=None, ai_api_url=None, ai_model=None):
+                 use_vad=True, vad_threshold=0.5):
         super().__init__()
         self.audio_path = audio_path
         self.output_path = output_path
@@ -27,12 +26,9 @@ class ASRThread(QThread):
         self.api_url = api_url
         self.pause_threshold = pause_threshold
         self.max_words_per_segment = max_words_per_segment
-        # AI 优化参数
-        self.ai_optimize = ai_optimize
-        self.optimize_level = optimize_level
-        self.ai_api_key = ai_api_key
-        self.ai_api_url = ai_api_url
-        self.ai_model = ai_model
+        # VAD 参数
+        self.use_vad = use_vad
+        self.vad_threshold = vad_threshold
     
     def run(self):
         try:
@@ -47,34 +43,22 @@ class ASRThread(QThread):
             # 设置断句参数
             processor.pause_threshold = self.pause_threshold
             processor.max_words_per_segment = self.max_words_per_segment
+            # 设置 VAD 参数
+            processor.use_vad = self.use_vad
+            processor.vad_threshold = self.vad_threshold
             
-            self.progress.emit(f"开始转录... (停顿阈值: {self.pause_threshold}s, 每段最大词数: {self.max_words_per_segment})")
+            vad_info = f", VAD: {'启用' if self.use_vad else '禁用'}" if self.engine_type == "whisper" else ""
+            self.progress.emit(f"开始转录... (停顿阈值: {self.pause_threshold}s, 每段最大词数: {self.max_words_per_segment}{vad_info})")
             
-            # 先获取原始转录结果
+            # 获取转录结果
             segments = processor.transcribe(
                 self.audio_path, 
-                output_srt_path=None,  # 先不保存，获取 segments
+                output_srt_path=None,
                 language_code=self.language_code,
                 diarize=self.diarize
             )
             
-            # 如果启用了 AI 优化
-            if self.ai_optimize and self.ai_api_key and self.ai_api_url:
-                self.progress.emit(f"正在使用 AI 优化字幕 (强度: {self.optimize_level})...")
-                try:
-                    segments = processor.optimize_with_ai(
-                        segments,
-                        api_key=self.ai_api_key,
-                        api_url=self.ai_api_url,
-                        model=self.ai_model,
-                        optimize_level=self.optimize_level,
-                        progress_callback=lambda msg: self.progress.emit(msg)
-                    )
-                    self.progress.emit("AI 优化完成")
-                except Exception as e:
-                    self.progress.emit(f"AI 优化失败: {e}，使用原始结果")
-            
-            # 保存最终结果
+            # 保存结果
             processor._save_as_srt(segments, self.output_path)
             
             self.finished.emit(True, f"字幕生成成功！保存至: {self.output_path}")
@@ -242,27 +226,33 @@ class ASRWidget(QWidget):
         
         segment_layout.addStretch()
         
-        # AI 优化选项
-        ai_optimize_layout = QHBoxLayout()
-        self.ai_optimize_check = QCheckBox("AI 优化字幕")
-        self.ai_optimize_check.setToolTip("使用 AI 优化语句流畅度和断句（需要配置翻译引擎的 API）")
-        self.ai_optimize_check.stateChanged.connect(self.on_ai_optimize_changed)
-        ai_optimize_layout.addWidget(self.ai_optimize_check)
+        # VAD 设置（Whisper 专用）
+        vad_layout = QHBoxLayout()
+        self.vad_check = QCheckBox("启用 Silero-VAD")
+        self.vad_check.setChecked(True)
+        self.vad_check.setToolTip("使用 Silero-VAD 提升时间戳精准度，减少幻觉和循环错误")
+        self.vad_check.stateChanged.connect(self.on_vad_changed)
+        vad_layout.addWidget(self.vad_check)
         
-        ai_optimize_layout.addWidget(QLabel("优化强度:"))
-        self.optimize_level_combo = QComboBox()
-        self.optimize_level_combo.addItems(["轻度 (仅断句)", "中度 (断句+润色)", "重度 (完全重写)"])
-        self.optimize_level_combo.setCurrentIndex(1)
-        self.optimize_level_combo.setEnabled(False)
-        self.optimize_level_combo.setToolTip("轻度: 只优化断句\n中度: 优化断句并润色语句\n重度: 完全重写使其更流畅")
-        ai_optimize_layout.addWidget(self.optimize_level_combo)
-        ai_optimize_layout.addStretch()
+        vad_layout.addWidget(QLabel("VAD 阈值:"))
+        self.vad_threshold_spin = QDoubleSpinBox()
+        self.vad_threshold_spin.setRange(0.1, 0.9)
+        self.vad_threshold_spin.setSingleStep(0.1)
+        self.vad_threshold_spin.setValue(0.5)
+        self.vad_threshold_spin.setDecimals(1)
+        self.vad_threshold_spin.setToolTip("VAD 检测阈值 (0.1-0.9)\n越高越严格，可能漏检轻声\n越低越宽松，可能误检噪音")
+        vad_layout.addWidget(self.vad_threshold_spin)
+        
+        self.vad_hint_label = QLabel("(推荐 0.5，嘈杂环境可调高)")
+        self.vad_hint_label.setStyleSheet("color: gray; font-size: 10px;")
+        vad_layout.addWidget(self.vad_hint_label)
+        vad_layout.addStretch()
         
         output_layout.addLayout(output_file_layout)
         output_layout.addLayout(model_layout)
         output_layout.addLayout(lang_layout)
         output_layout.addLayout(segment_layout)
-        output_layout.addLayout(ai_optimize_layout)
+        output_layout.addLayout(vad_layout)
         output_group.setLayout(output_layout)
         
         # 执行按钮
@@ -308,6 +298,11 @@ class ASRWidget(QWidget):
         self.model_combo.setEnabled(True)
         self.lang_combo.setEnabled(is_elevenlabs or is_qwen)
         self.diarize_check.setEnabled(is_elevenlabs)
+        
+        # VAD 控件仅 Whisper 可用
+        self.vad_check.setEnabled(is_whisper)
+        self.vad_threshold_spin.setEnabled(is_whisper and self.vad_check.isChecked())
+        self.vad_hint_label.setVisible(is_whisper)
         
         # 更新模型列表
         if is_qwen:
@@ -698,32 +693,12 @@ class ASRWidget(QWidget):
         self.log(f"开始语音识别 (使用 {engine_type.upper()})...")
         self.log(f"断句设置: 停顿阈值={pause_threshold}s, 每段最大词数={max_words}")
         
-        # AI 优化参数
-        ai_optimize = self.ai_optimize_check.isChecked()
-        optimize_level_text = self.optimize_level_combo.currentText()
-        if "轻度" in optimize_level_text:
-            optimize_level = "light"
-        elif "重度" in optimize_level_text:
-            optimize_level = "heavy"
-        else:
-            optimize_level = "medium"
+        # VAD 参数（仅 Whisper）
+        use_vad = self.vad_check.isChecked() if engine_type == "whisper" else False
+        vad_threshold = self.vad_threshold_spin.value()
         
-        # 获取 AI API 配置
-        ai_api_key = None
-        ai_api_url = None
-        ai_model = None
-        
-        if ai_optimize:
-            ai_config = self._get_ai_config()
-            ai_api_key = ai_config.get("api_key")
-            ai_api_url = ai_config.get("api_url")
-            ai_model = ai_config.get("model")
-            
-            if not ai_api_key:
-                self.log("⚠️ AI 优化已启用但未配置 API，请在字幕翻译页面设置翻译引擎")
-                ai_optimize = False
-            else:
-                self.log(f"AI 优化已启用 (强度: {optimize_level_text})")
+        if use_vad and engine_type == "whisper":
+            self.log(f"Silero-VAD 已启用 (阈值: {vad_threshold})")
         
         self.thread = ASRThread(
             audio_path, output_path, 
@@ -735,11 +710,8 @@ class ASRWidget(QWidget):
             api_url,
             pause_threshold=pause_threshold,
             max_words_per_segment=max_words,
-            ai_optimize=ai_optimize,
-            optimize_level=optimize_level,
-            ai_api_key=ai_api_key,
-            ai_api_url=ai_api_url,
-            ai_model=ai_model
+            use_vad=use_vad,
+            vad_threshold=vad_threshold
         )
         self.thread.finished.connect(self.on_process_finished)
         self.thread.progress.connect(self.log)
@@ -756,32 +728,10 @@ class ASRWidget(QWidget):
             if "ElevenLabs" in engine_text or "Qwen" in engine_text:
                 self.save_api_key_to_config()
     
-    def on_ai_optimize_changed(self, state):
-        """当 AI 优化选项改变时"""
+    def on_vad_changed(self, state):
+        """当 VAD 选项改变时"""
         enabled = state == Qt.CheckState.Checked.value
-        self.optimize_level_combo.setEnabled(enabled)
-        
-        if enabled:
-            # 检查是否配置了翻译 API
-            ai_config = self._get_ai_config()
-            if not ai_config.get("api_key"):
-                self.log("⚠️ AI 优化需要配置翻译引擎的 API（在字幕翻译页面设置）")
-    
-    def _get_ai_config(self):
-        """从配置文件获取 AI/翻译 API 配置"""
-        import json
-        try:
-            with open("config.json", "r") as f:
-                config = json.load(f)
-                subtitle_settings = config.get("subtitle_settings", {})
-                return {
-                    "api_key": subtitle_settings.get("api_key", ""),
-                    "api_url": subtitle_settings.get("api_url", "https://api.deepseek.com/v1/chat/completions"),
-                    "model": subtitle_settings.get("model", "deepseek-chat")
-                }
-        except Exception as e:
-            print(f"读取 AI 配置失败: {e}")
-            return {}
+        self.vad_threshold_spin.setEnabled(enabled)
     
     def log(self, message):
         console_info(message, "语音识别")

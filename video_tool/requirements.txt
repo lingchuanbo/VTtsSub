@@ -8,5 +8,7 @@ dashscope
 srt
 demucs
 mutagen
+# Silero-VAD 用于提升 Whisper 时间戳精准度，减少幻觉
+# silero-vad 通过 torch.hub 自动下载，无需单独安装
 # PyTorch GPU 版本需要单独安装，请运行 install_pytorch_gpu.bat
 # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121

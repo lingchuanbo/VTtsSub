@@ -1,7 +1,8 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QLineEdit, QPushButton, QFileDialog, QTextEdit,
                              QGroupBox, QComboBox, QProgressBar, QSpinBox,
-                             QDoubleSpinBox, QFontComboBox, QFrame, QSplitter, QScrollArea)
+                             QDoubleSpinBox, QFontComboBox, QFrame, QSplitter, 
+                             QScrollArea, QCheckBox)
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QFont, QColor, QTextCharFormat, QPainter, QPen, QBrush
 from .console_widget import console_info, console_error, console_warning
@@ -327,6 +328,33 @@ class SubtitleWidget(QWidget):
         style_group.setLayout(style_main_layout)
         
         # 操作组
+        # 翻译前优化组
+        optimize_group = QGroupBox("翻译前优化 (可选)")
+        optimize_layout = QVBoxLayout()
+        
+        optimize_row1 = QHBoxLayout()
+        self.optimize_check = QCheckBox("启用 AI 优化原文")
+        self.optimize_check.setToolTip("在翻译前使用 AI 优化英文字幕的断句和流畅度，提升翻译质量")
+        self.optimize_check.stateChanged.connect(self.on_optimize_changed)
+        optimize_row1.addWidget(self.optimize_check)
+        
+        optimize_row1.addWidget(QLabel("优化强度:"))
+        self.optimize_level_combo = QComboBox()
+        self.optimize_level_combo.addItems(["轻度 (仅断句)", "中度 (断句+润色)", "重度 (完全重写)"])
+        self.optimize_level_combo.setCurrentIndex(1)
+        self.optimize_level_combo.setEnabled(False)
+        self.optimize_level_combo.setToolTip("轻度: 只优化断句位置\n中度: 优化断句并润色语句\n重度: 完全重写使其更流畅")
+        optimize_row1.addWidget(self.optimize_level_combo)
+        optimize_row1.addStretch()
+        
+        self.optimize_hint = QLabel("💡 优化可减少 ASR 识别错误、改善断句，提升翻译质量")
+        self.optimize_hint.setStyleSheet("color: #4A90E2; font-size: 11px;")
+        
+        optimize_layout.addLayout(optimize_row1)
+        optimize_layout.addWidget(self.optimize_hint)
+        optimize_group.setLayout(optimize_layout)
+        
+        # 操作组
         operation_group = QGroupBox("翻译操作")
         operation_layout = QVBoxLayout()
         
@@ -380,6 +408,7 @@ class SubtitleWidget(QWidget):
         layout.addWidget(input_group)
         layout.addWidget(engine_group)
         layout.addWidget(prompt_group)
+        layout.addWidget(optimize_group)
         layout.addWidget(style_group)
         layout.addWidget(operation_group)
         layout.addStretch()
@@ -530,6 +559,11 @@ class SubtitleWidget(QWidget):
         self.update_preview()
         self.save_settings()
     
+    def on_optimize_changed(self, state):
+        """当优化选项改变时"""
+        enabled = state == Qt.CheckState.Checked.value
+        self.optimize_level_combo.setEnabled(enabled)
+    
     def update_preview(self):
         cn_color_map = {"白色": "#FFFFFF", "黄色": "#FFFF00", "青色": "#00FFFF", "绿色": "#00FF00"}
         en_color_map = {"白色": "#FFFFFF", "浅灰": "#CCCCCC", "黄色": "#FFFF00", "青色": "#00FFFF"}
@@ -667,6 +701,25 @@ class SubtitleWidget(QWidget):
         if request_interval > 0:
             self.log(f"请求间隔: {request_interval} 秒")
         
+        # 翻译前优化（如果启用）
+        if self.optimize_check.isChecked():
+            optimize_level_text = self.optimize_level_combo.currentText()
+            if "轻度" in optimize_level_text:
+                optimize_level = "light"
+            elif "重度" in optimize_level_text:
+                optimize_level = "heavy"
+            else:
+                optimize_level = "medium"
+            
+            self.log(f"正在优化原文字幕 (强度: {optimize_level_text})...")
+            try:
+                self.current_subtitles = self._optimize_subtitles(
+                    self.current_subtitles, optimize_level
+                )
+                self.log(f"✓ 原文优化完成")
+            except Exception as e:
+                self.log(f"⚠️ 优化失败: {e}，使用原始字幕继续翻译")
+        
         self.translate_thread = TranslateThread(
             self.manager, 
             self.current_subtitles, 
@@ -790,6 +843,177 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(ass_content)
+
+    def _optimize_subtitles(self, subtitles, optimize_level="medium"):
+        """
+        使用 AI 优化字幕的断句和流畅度（翻译前处理）
+        
+        Args:
+            subtitles: 字幕列表 [{"time_range": str, "text": str}, ...]
+            optimize_level: 优化强度 "light"(轻度), "medium"(中度), "heavy"(重度)
+            
+        Returns:
+            优化后的字幕列表
+        """
+        import requests
+        import re
+        
+        if not subtitles:
+            return subtitles
+        
+        api_url = self.api_url_edit.text().strip()
+        api_key = self.api_key_edit.text().strip()
+        model = self.model_edit.text().strip()
+        
+        if not api_key or not api_url:
+            raise ValueError("请先配置翻译引擎的 API")
+        
+        # 根据优化强度选择提示词
+        if optimize_level == "light":
+            system_prompt = """你是字幕断句专家。请优化以下ASR识别的英文字幕断句，使其更自然。
+
+规则：
+1. 只调整断句位置，不修改文字内容
+2. 在语义完整的地方断句，避免句子中间断开
+3. 可以合并过短的相邻句子，或拆分过长的句子
+4. 保持时间轴连续，合理分配时间
+5. 输出格式必须与输入格式完全一致"""
+        elif optimize_level == "heavy":
+            system_prompt = """你是专业字幕编辑。请完全重写以下ASR识别的英文字幕，使其流畅自然。
+
+规则：
+1. 可以完全重写句子，使表达更清晰流畅
+2. 删除所有口语化的填充词（um, uh, like, you know等）和重复
+3. 修正明显的语法错误和识别错误
+4. 优化断句，使每条字幕长度适中（建议10-15个单词）
+5. 保持原意不变，时间轴合理分配
+6. 输出格式必须与输入格式完全一致"""
+        else:  # medium
+            system_prompt = """你是字幕优化专家。请优化以下ASR识别的英文字幕，使其更流畅。
+
+规则：
+1. 优化断句位置，在语义完整处断开
+2. 删除明显的口语填充词（um, uh, like等）
+3. 修正明显的识别错误
+4. 保持原意和风格不变
+5. 时间轴需要合理对应文本长度
+6. 输出格式必须与输入格式完全一致"""
+        
+        # 准备输入数据
+        input_lines = []
+        for i, sub in enumerate(subtitles):
+            input_lines.append(f"{i+1}|{sub['time_range']}|{sub['text']}")
+        
+        # 分批处理（每批20条）
+        batch_size = 20
+        all_optimized = []
+        total_batches = (len(input_lines) + batch_size - 1) // batch_size
+        
+        for batch_idx in range(total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(input_lines))
+            batch_lines = input_lines[start_idx:end_idx]
+            
+            self.log(f"  优化进度: 批次 {batch_idx + 1}/{total_batches}")
+            
+            user_message = f"""请优化以下 {len(batch_lines)} 条英文字幕：
+
+{chr(10).join(batch_lines)}
+
+输出格式要求：
+- 每行格式: 序号|时间范围|优化后文本
+- 时间格式保持不变: HH:MM:SS,mmm --> HH:MM:SS,mmm
+- 可以合并或拆分条目，但时间必须连续
+- 只输出优化结果，不要其他说明"""
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                "temperature": 0.3
+            }
+            
+            try:
+                response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+                
+                if response.status_code != 200:
+                    self.log(f"  ⚠️ 批次 {batch_idx + 1} 优化失败: {response.status_code}")
+                    # 失败时保留原始数据
+                    for line in batch_lines:
+                        parts = line.split('|', 2)
+                        if len(parts) == 3:
+                            all_optimized.append({
+                                "time_range": parts[1],
+                                "text": parts[2]
+                            })
+                    continue
+                
+                result = response.json()
+                content = result['choices'][0]['message']['content']
+                
+                # 解析优化结果
+                optimized_batch = self._parse_optimized_response(content, batch_lines)
+                all_optimized.extend(optimized_batch)
+                
+            except Exception as e:
+                self.log(f"  ⚠️ 批次 {batch_idx + 1} 出错: {e}")
+                # 失败时保留原始数据
+                for line in batch_lines:
+                    parts = line.split('|', 2)
+                    if len(parts) == 3:
+                        all_optimized.append({
+                            "time_range": parts[1],
+                            "text": parts[2]
+                        })
+        
+        return all_optimized if all_optimized else subtitles
+    
+    def _parse_optimized_response(self, content, original_lines):
+        """解析AI优化后的响应"""
+        import re
+        
+        optimized = []
+        lines = content.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('```'):
+                continue
+            
+            # 匹配格式: 序号|时间范围|文本
+            match = re.match(r'^(\d+)\|([^|]+)\|(.+)$', line)
+            if match:
+                try:
+                    time_range = match.group(2).strip()
+                    text = match.group(3).strip()
+                    
+                    if text and '-->' in time_range:
+                        optimized.append({
+                            "time_range": time_range,
+                            "text": text
+                        })
+                except Exception as e:
+                    continue
+        
+        # 如果解析失败，返回原始数据
+        if not optimized:
+            self.log("  ⚠️ AI响应解析失败，使用原始字幕")
+            for line in original_lines:
+                parts = line.split('|', 2)
+                if len(parts) == 3:
+                    optimized.append({
+                        "time_range": parts[1],
+                        "text": parts[2]
+                    })
+        
+        return optimized
 
     def log(self, message):
         """输出日志到统一控制台"""

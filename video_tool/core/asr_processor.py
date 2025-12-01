@@ -87,13 +87,18 @@ class ASRProcessor:
         print(f"Script path: {script_path}")
         print(f"Python executable: {sys.executable}")
         
-        # Build command
+        # Build command with VAD support
+        use_vad = getattr(self, 'use_vad', True)
+        vad_threshold = getattr(self, 'vad_threshold', 0.5)
+        
         cmd = [
             sys.executable,
             script_path,
             audio_path,
             "--model", self.model_size,
-            "--model_dir", model_dir
+            "--model_dir", model_dir,
+            "--use_vad", "true" if use_vad else "false",
+            "--vad_threshold", str(vad_threshold)
         ]
         
         try:
