@@ -121,6 +121,7 @@ class ASRWidget(QWidget):
         self.engine_combo = QComboBox()
         self.engine_combo.addItems([
             "Whisper (本地, 免费)",
+            "Faster-Whisper (本地, 更快)",
             "ElevenLabs (云端, 需要 API Key)",
             "Qwen ASR (云端, 需要 API Key)"
         ])
@@ -203,28 +204,32 @@ class ASRWidget(QWidget):
         lang_layout.addWidget(self.diarize_check)
         lang_layout.addStretch()
         
-        # 断句设置（Whisper）
-        segment_layout = QHBoxLayout()
-        segment_layout.addWidget(QLabel("断句设置:"))
+        # 断句设置（Whisper）- 暂时隐藏，使用后处理自动优化
+        # segment_layout = QHBoxLayout()
+        # segment_layout.addWidget(QLabel("断句设置:"))
+        # 
+        # segment_layout.addWidget(QLabel("停顿阈值:"))
+        # self.pause_threshold_spin = QDoubleSpinBox()
+        # self.pause_threshold_spin.setRange(0.1, 3.0)
+        # self.pause_threshold_spin.setSingleStep(0.1)
+        # self.pause_threshold_spin.setValue(0.5)
+        # self.pause_threshold_spin.setDecimals(1)
+        # self.pause_threshold_spin.setSuffix(" 秒")
+        # self.pause_threshold_spin.setToolTip("超过此时间的停顿会分成新段落")
+        # segment_layout.addWidget(self.pause_threshold_spin)
+        # 
+        # segment_layout.addWidget(QLabel("每段最大词数:"))
+        # self.max_words_spin = QSpinBox()
+        # self.max_words_spin.setRange(5, 50)
+        # self.max_words_spin.setValue(12)
+        # self.max_words_spin.setToolTip("每个字幕段落的最大词数")
+        # segment_layout.addWidget(self.max_words_spin)
+        # 
+        # segment_layout.addStretch()
         
-        segment_layout.addWidget(QLabel("停顿阈值:"))
-        self.pause_threshold_spin = QDoubleSpinBox()
-        self.pause_threshold_spin.setRange(0.1, 3.0)
-        self.pause_threshold_spin.setSingleStep(0.1)
-        self.pause_threshold_spin.setValue(0.5)
-        self.pause_threshold_spin.setDecimals(1)
-        self.pause_threshold_spin.setSuffix(" 秒")
-        self.pause_threshold_spin.setToolTip("超过此时间的停顿会分成新段落")
-        segment_layout.addWidget(self.pause_threshold_spin)
-        
-        segment_layout.addWidget(QLabel("每段最大词数:"))
-        self.max_words_spin = QSpinBox()
-        self.max_words_spin.setRange(5, 50)
-        self.max_words_spin.setValue(12)
-        self.max_words_spin.setToolTip("每个字幕段落的最大词数")
-        segment_layout.addWidget(self.max_words_spin)
-        
-        segment_layout.addStretch()
+        # 使用默认值
+        self.pause_threshold_spin = None
+        self.max_words_spin = None
         
         # VAD 设置（Whisper 专用）
         vad_layout = QHBoxLayout()
@@ -251,7 +256,7 @@ class ASRWidget(QWidget):
         output_layout.addLayout(output_file_layout)
         output_layout.addLayout(model_layout)
         output_layout.addLayout(lang_layout)
-        output_layout.addLayout(segment_layout)
+        # output_layout.addLayout(segment_layout)  # 断句设置暂时隐藏
         output_layout.addLayout(vad_layout)
         output_group.setLayout(output_layout)
         
@@ -285,12 +290,14 @@ class ASRWidget(QWidget):
         """当 ASR 引擎切换时更新界面"""
         engine_text = self.engine_combo.currentText()
         
-        is_whisper = "Whisper" in engine_text
+        is_whisper = "Whisper" in engine_text and "Faster" not in engine_text
+        is_faster_whisper = "Faster-Whisper" in engine_text
+        is_local_whisper = is_whisper or is_faster_whisper
         is_elevenlabs = "ElevenLabs" in engine_text
         is_qwen = "Qwen" in engine_text
         
         # 启用/禁用相关控件
-        self.api_key_edit.setEnabled(not is_whisper)
+        self.api_key_edit.setEnabled(not is_local_whisper)
         self.api_url_edit.setEnabled(is_qwen)
         self.api_type_label.setVisible(is_qwen)
         self.url_input_edit.setEnabled(is_qwen)  # URL 输入仅 Qwen 可用
@@ -299,10 +306,10 @@ class ASRWidget(QWidget):
         self.lang_combo.setEnabled(is_elevenlabs or is_qwen)
         self.diarize_check.setEnabled(is_elevenlabs)
         
-        # VAD 控件仅 Whisper 可用
-        self.vad_check.setEnabled(is_whisper)
-        self.vad_threshold_spin.setEnabled(is_whisper and self.vad_check.isChecked())
-        self.vad_hint_label.setVisible(is_whisper)
+        # VAD 控件仅本地 Whisper 可用
+        self.vad_check.setEnabled(is_local_whisper)
+        self.vad_threshold_spin.setEnabled(is_local_whisper and self.vad_check.isChecked())
+        self.vad_hint_label.setVisible(is_local_whisper)
         
         # 更新模型列表
         if is_qwen:
@@ -320,11 +327,20 @@ class ASRWidget(QWidget):
                 ])
             self.model_combo.setCurrentIndex(0)  # 默认选择第一个
             self.model_hint_label.setText("(推荐 flash 用于本地文件)")
+        elif is_faster_whisper:
+            self.model_combo.clear()
+            self.model_combo.addItems([
+                "tiny", "base", "small", "medium", 
+                "large-v2", "large-v3", "large-v3-turbo",
+                "distil-large-v2", "distil-large-v3"
+            ])
+            self.model_combo.setCurrentText("base")
+            self.model_hint_label.setText("(推荐 large-v3-turbo 或 distil-large-v2)")
         elif is_whisper:
             self.model_combo.clear()
             self.model_combo.addItems(["tiny", "base", "small", "medium", "large"])
             self.model_combo.setCurrentText("base")
-            self.model_hint_label.setText("(需要 PyTorch，如有问题推荐用 ElevenLabs)")
+            self.model_hint_label.setText("(需要 PyTorch，如有问题推荐用 Faster-Whisper)")
         else:
             self.model_combo.setEnabled(False)
             self.model_hint_label.setText("")
@@ -647,6 +663,8 @@ class ASRWidget(QWidget):
             engine_type = "elevenlabs"
         elif "Qwen" in engine_text:
             engine_type = "qwen"
+        elif "Faster-Whisper" in engine_text:
+            engine_type = "faster-whisper"
         else:
             engine_type = "whisper"
         
@@ -686,12 +704,11 @@ class ASRWidget(QWidget):
         self.process_btn.setEnabled(False)
         self.progress_bar.show()
         
-        # 获取断句参数
-        pause_threshold = self.pause_threshold_spin.value()
-        max_words = self.max_words_spin.value()
+        # 获取断句参数（使用默认值，后处理会自动优化）
+        pause_threshold = self.pause_threshold_spin.value() if self.pause_threshold_spin else 0.5
+        max_words = self.max_words_spin.value() if self.max_words_spin else 12
         
         self.log(f"开始语音识别 (使用 {engine_type.upper()})...")
-        self.log(f"断句设置: 停顿阈值={pause_threshold}s, 每段最大词数={max_words}")
         
         # VAD 参数（仅 Whisper）
         use_vad = self.vad_check.isChecked() if engine_type == "whisper" else False

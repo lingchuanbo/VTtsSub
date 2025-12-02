@@ -8,7 +8,7 @@ class ASRProcessor:
         
         Args:
             model_size (str): Whisper model size or Qwen model name
-            engine_type (str): "whisper", "elevenlabs", or "qwen"
+            engine_type (str): "whisper", "faster-whisper", "elevenlabs", or "qwen"
             api_key (str): API key (required for elevenlabs and qwen)
             api_url (str): API URL for Qwen (optional)
         """
@@ -20,6 +20,11 @@ class ASRProcessor:
         # 断句参数
         self.pause_threshold = 0.5  # 停顿阈值（秒）
         self.max_words_per_segment = 12  # 每段最大词数
+        # VAD 参数
+        self.use_vad = True
+        self.vad_threshold = 0.5
+        # Faster-Whisper 参数
+        self.compute_type = "auto"  # auto/float16/int8
 
     def transcribe(self, audio_path, output_srt_path=None, language_code=None, diarize=False):
         """
@@ -42,6 +47,8 @@ class ASRProcessor:
             segments = self._transcribe_elevenlabs(audio_path, language_code, diarize)
         elif self.engine_type == "qwen":
             segments = self._transcribe_qwen(audio_path, language_code)
+        elif self.engine_type == "faster-whisper":
+            segments = self._transcribe_faster_whisper(audio_path, language_code)
         else:
             segments = self._transcribe_whisper(audio_path)
         
@@ -189,6 +196,120 @@ class ASRProcessor:
                 
         except Exception as e:
             raise RuntimeError(f"Error running Whisper subprocess: {str(e)}")
+
+    def _transcribe_faster_whisper(self, audio_path, language_code=None):
+        """
+        使用 faster-whisper 进行转录（更快，内置 VAD）
+        
+        faster-whisper 使用 CTranslate2 优化，速度更快，显存占用更低
+        支持模型: tiny, base, small, medium, large-v2, large-v3, large-v3-turbo, distil-large-v2, distil-large-v3
+        """
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            # faster-whisper 未安装，检查模型是否兼容标准 whisper
+            standard_whisper_models = ["tiny", "base", "small", "medium", "large", "large-v1", "large-v2", "large-v3", "large-v3-turbo", "turbo"]
+            if self.model_size not in standard_whisper_models and not self.model_size.endswith(".en"):
+                raise RuntimeError(
+                    f"模型 '{self.model_size}' 仅在 faster-whisper 中可用。\n"
+                    f"请安装 faster-whisper: pip install faster-whisper\n"
+                    f"或选择标准 Whisper 支持的模型: {', '.join(standard_whisper_models)}"
+                )
+            print("faster-whisper 未安装，回退到标准 whisper")
+            return self._transcribe_whisper(audio_path)
+        
+        import torch
+        
+        # 自动选择设备
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # 自动选择计算类型
+        if self.compute_type == "auto":
+            compute_type = "float16" if device == "cuda" else "int8"
+        else:
+            compute_type = self.compute_type
+        
+        # 模型名称映射（支持 large-v3-turbo）
+        model_name = self.model_size
+        if model_name == "large":
+            model_name = "large-v2"  # 默认使用 large-v2
+        
+        print(f"Loading faster-whisper model: {model_name} on {device} ({compute_type})")
+        
+        # 模型目录
+        model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', 'whisper')
+        os.makedirs(model_dir, exist_ok=True)
+        
+        # 加载模型
+        model = WhisperModel(
+            model_name,
+            device=device,
+            compute_type=compute_type,
+            download_root=model_dir
+        )
+        
+        # 优化的 VAD 参数（减少过度分段）
+        vad_parameters = None
+        if getattr(self, 'use_vad', True):
+            # 获取 VAD 配置
+            vad_threshold = getattr(self, 'vad_threshold', 0.3)
+            min_silence_ms = getattr(self, 'vad_min_silence_ms', 1000)  # 增加到 1000ms
+            speech_pad_ms = getattr(self, 'vad_speech_pad_ms', 200)     # 减少到 200ms
+            
+            vad_parameters = {
+                "min_silence_duration_ms": min_silence_ms,
+                "speech_pad_ms": speech_pad_ms,
+                "threshold": vad_threshold
+            }
+            print(f"VAD enabled: threshold={vad_threshold}, min_silence={min_silence_ms}ms, pad={speech_pad_ms}ms")
+        
+        # 转录参数
+        print(f"Transcribing {audio_path}...")
+        
+        segments_generator, info = model.transcribe(
+            audio_path,
+            language=language_code if language_code and language_code != "None" else None,
+            task="transcribe",
+            beam_size=5,
+            best_of=5,
+            temperature=0.0,
+            word_timestamps=True,
+            condition_on_previous_text=False,  # 减少幻觉和错误累积
+            vad_filter=getattr(self, 'use_vad', True),
+            vad_parameters=vad_parameters,
+            no_speech_threshold=0.6,           # 静音检测阈值
+            log_prob_threshold=-1.0,           # 对数概率阈值
+            compression_ratio_threshold=2.4,   # 压缩比阈值（检测重复）
+        )
+        
+        # 收集结果
+        segments = []
+        for segment in segments_generator:
+            seg_data = {
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text.strip(),
+            }
+            
+            # 添加词级时间戳
+            if segment.words:
+                seg_data["words"] = [
+                    {
+                        "word": word.word,
+                        "start": word.start,
+                        "end": word.end,
+                        "probability": word.probability
+                    }
+                    for word in segment.words
+                ]
+            
+            segments.append(seg_data)
+        
+        print(f"Transcription complete: {len(segments)} segments")
+        print(f"Detected language: {info.language} ({info.language_probability:.2%})")
+        
+        # 基于词级时间戳优化字幕分段
+        return self._optimize_segments_by_words(segments)
 
     def _transcribe_elevenlabs(self, audio_path, language_code=None, diarize=False):
         """Transcribe using ElevenLabs Speech-to-Text."""
@@ -785,7 +906,59 @@ class ASRProcessor:
                     "text": "".join(current_segment["words"]).strip()
                 })
         
+        # 应用后处理优化
+        optimized = self._apply_post_processing(optimized)
+        
         return optimized
+    
+    def _apply_post_processing(self, segments):
+        """
+        应用 ASR 后处理优化
+        
+        包括：技术术语修正、智能合并、标点修复等
+        """
+        try:
+            from video_tool.core.asr_post_processor import optimize_asr_output
+            
+            print("Applying ASR post-processing...")
+            optimized = optimize_asr_output(
+                segments,
+                min_duration=1.5,
+                max_duration=8.0,   # 最大 8 秒
+                min_words=4,
+                max_words=20        # 最大 20 词
+            )
+            print(f"Post-processing: {len(segments)} -> {len(optimized)} segments")
+            
+            # 质量监控
+            self._monitor_quality(optimized)
+            
+            return optimized
+        except ImportError as e:
+            print(f"Warning: ASR post-processor not available: {e}")
+            return segments
+        except Exception as e:
+            print(f"Warning: Post-processing failed: {e}")
+            return segments
+    
+    def _monitor_quality(self, segments):
+        """监控 ASR 质量"""
+        try:
+            from video_tool.core.asr_post_processor import ASRQualityMonitor
+            
+            monitor = ASRQualityMonitor()
+            metrics = monitor.monitor(segments)
+            
+            # 打印简要报告
+            print(f"\n[Quality] Score: {metrics['quality_score']}/100 ({metrics['quality_grade']})")
+            print(f"[Quality] Avg words: {metrics['avg_words_per_segment']}, Avg duration: {metrics['avg_duration']}s")
+            print(f"[Quality] Complete sentences: {metrics['complete_sentence_ratio']*100:.1f}%")
+            
+            if metrics['suggestions']:
+                print(f"[Quality] Suggestions: {metrics['suggestions'][0]}")
+            
+        except Exception as e:
+            print(f"Warning: Quality monitoring failed: {e}")
 
     def optimize_with_ai(self, segments, api_key, api_url, model, optimize_level="medium", progress_callback=None):
         """

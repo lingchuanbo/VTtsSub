@@ -1,0 +1,14 @@
+{
+  "_description": "用户自定义术语词库 - 添加您项目特定的术语",
+  "_usage": "在 terms 中添加您的自定义术语，key 为小写形式，value 为正确格式",
+  "_version": "1.0.0",
+  
+  "terms": {
+    "_example_game_name": "YourGameName",
+    "_example_company": "YourCompany"
+  },
+  
+  "corrections": {
+    "_example_typo": "correct_spelling"
+  }
+}

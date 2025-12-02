@@ -1,0 +1,166 @@
+{
+  "_description": "ASR 错误修正词库 - 用于修正常见的语音识别错误",
+  "_usage": "添加新修正时，key 为错误形式，value 为正确形式",
+  "_version": "1.0.0",
+  
+  "whisper_errors": {
+    "_description": "Whisper/Faster-Whisper 常见识别错误",
+    "corrections": {
+      "Trick-lifr's": "trickle",
+      "trick-lifr's": "trickle",
+      "Trick lifr's": "trickle",
+      "trickle of of": "trickle of",
+      "mAIn": "main",
+      "mAin": "main",
+      "MAIn": "main",
+      "obtAIning": "obtaining",
+      "obtAining": "obtaining",
+      "progRAMs": "programs",
+      "progRams": "programs",
+      "avAIlable": "available",
+      "avAilable": "available",
+      "commUnity": "community",
+      "commUnIty": "community",
+      "Gado": "Godot",
+      "intagers": "integers",
+      "th.": "this",
+      "cts": "acts",
+      "objeacts": "objects",
+      "affeacts": "affects",
+      "kind ofacts": "kind of acts"
+    }
+  },
+  
+  "phrase_errors": {
+    "_description": "常见短语错误",
+    "corrections": {
+      "see the light day": "see the light of day",
+      "light day": "light of day",
+      "kind of a": "kind of",
+      "sort of a": "sort of",
+      "a lot of of": "a lot of",
+      "going to to": "going to",
+      "quality of life quality of life": "quality of life",
+      "the the": "the",
+      "a a": "a",
+      "is is": "is",
+      "to to": "to",
+      "of of": "of",
+      "and and": "and",
+      "or or": "or",
+      "but but": "but",
+      "that that": "that",
+      "this this": "this",
+      "it it": "it",
+      "in in": "in",
+      "on on": "on",
+      "at at": "at",
+      "for for": "for",
+      "with with": "with",
+      "from from": "from",
+      "by by": "by",
+      "as as": "as",
+      "be be": "be",
+      "have have": "have",
+      "has has": "has",
+      "had had": "had",
+      "do do": "do",
+      "does does": "does",
+      "did did": "did",
+      "will will": "will",
+      "would would": "would",
+      "could could": "could",
+      "should should": "should",
+      "can can": "can",
+      "may may": "may",
+      "might might": "might",
+      "must must": "must"
+    }
+  },
+  
+  "technical_phrase_errors": {
+    "_description": "技术相关短语错误",
+    "corrections": {
+      "F keys": "FKeys",
+      "on ready": "onready",
+      "on-ready": "onready",
+      "on readies": "onreadies",
+      "on-readies": "onreadies",
+      "on ready variable": "onready variable",
+      "drag and drop export variable": "drag-and-drop export variable",
+      "export references": "exported references",
+      "cubal games.com": "cubalgames.com",
+      "cubalgames. com": "cubalgames.com",
+      "cubalgames .com": "cubalgames.com",
+      "H sliders": "H-sliders",
+      "V sliders": "V-sliders",
+      "H slider": "H-slider",
+      "V slider": "V-slider"
+    }
+  },
+  
+  "punctuation_errors": {
+    "_description": "标点相关错误",
+    "corrections": {
+      "Wayland stuff, which I covered in a previous?": "Wayland stuff, which I covered in a previous video?",
+      " ,": ",",
+      " .": ".",
+      " ?": "?",
+      " !": "!",
+      " ;": ";",
+      " :": ":"
+    }
+  },
+  
+  "number_errors": {
+    "_description": "数字相关错误",
+    "corrections": {
+      "Dev 1": "Dev1",
+      "Dev 2": "Dev2",
+      "Dev 3": "Dev3",
+      "Dev 4": "Dev4",
+      "Dev 5": "Dev5",
+      "Dev 6": "Dev6",
+      "Dev 7": "Dev7",
+      "Dev 8": "Dev8",
+      "Dev 9": "Dev9",
+      "version 4. 5": "version 4.5",
+      "version 4. 6": "version 4.6",
+      "4. 0": "4.0",
+      "4. 1": "4.1",
+      "4. 2": "4.2",
+      "4. 3": "4.3",
+      "4. 4": "4.4",
+      "4. 5": "4.5",
+      "4. 6": "4.6"
+    }
+  },
+  
+  "regex_patterns": {
+    "_description": "正则表达式修正模式（高级用户使用）",
+    "_note": "pattern 为正则表达式，replacement 为替换字符串，flags 可选",
+    "patterns": [
+      {
+        "name": "fix_dev_space",
+        "description": "修复 Dev 后面的空格问题",
+        "pattern": "\\bDev\\s+(\\d+)",
+        "replacement": "Dev$1",
+        "flags": ""
+      },
+      {
+        "name": "fix_version_space",
+        "description": "修复版本号中的空格",
+        "pattern": "(\\d+)\\. (\\d+)",
+        "replacement": "$1.$2",
+        "flags": ""
+      },
+      {
+        "name": "fix_pr_case",
+        "description": "确保 PR/PRs 大写",
+        "pattern": "\\b[Pp][Rr]s?\\b",
+        "replacement": "PR",
+        "flags": "i"
+      }
+    ]
+  }
+}

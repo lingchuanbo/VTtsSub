@@ -8,6 +8,10 @@ dashscope
 srt
 demucs
 mutagen
+faster-whisper
+# Faster-Whisper: 更快的 Whisper 实现，内置 VAD 支持
+# pip install faster-whisper
+# 注意：faster-whisper 和 openai-whisper 可以共存，按需选择使用
 # Silero-VAD 用于提升 Whisper 时间戳精准度，减少幻觉
 # silero-vad 通过 torch.hub 自动下载，无需单独安装
 # PyTorch GPU 版本需要单独安装，请运行 install_pytorch_gpu.bat
