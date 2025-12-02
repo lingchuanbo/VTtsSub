@@ -244,8 +244,19 @@ class DictionaryManager:
         if not self._loaded:
             self.load_all()
         
-        # 1. 应用错误修正（精确匹配）
+        # 1. 应用错误修正（支持大小写不敏感匹配）
         all_corrections = {**self.error_corrections, **self.custom_corrections}
+        for wrong, correct in all_corrections.items():
+            # 先尝试精确匹配
+            if wrong in text:
+                text = text.replace(wrong, correct)
+            # 再尝试不区分大小写匹配
+            elif wrong.lower() in text.lower():
+                pattern = re.compile(re.escape(wrong), re.IGNORECASE)
+                text = pattern.sub(correct, text)
+            continue
+        
+        # 额外处理：确保错误修正被应用
         for wrong, correct in all_corrections.items():
             if wrong in text:
                 text = text.replace(wrong, correct)

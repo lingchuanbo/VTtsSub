@@ -1530,14 +1530,16 @@ def fix_technical_errors(segments: List[Dict]) -> List[Dict]:
 
 def intelligent_merge_segments(segments: List[Dict], 
                                 max_duration: float = 10.0,
-                                max_words: int = 25) -> List[Dict]:
+                                max_words: int = 25,
+                                max_chars: int = 150) -> List[Dict]:
     """
-    基于语义和语法的智能句子合并
+    智能分段 - 在完整性和可读性间取得平衡
     
     Args:
         segments: 段落列表
         max_duration: 最大段落时长
         max_words: 最大词数
+        max_chars: 最大字符数
         
     Returns:
         合并后的段落列表
@@ -1545,96 +1547,308 @@ def intelligent_merge_segments(segments: List[Dict],
     if not segments:
         return segments
     
-    merged = []
-    current = None
+    optimized = []
+    buffer = []
     
-    for seg in segments:
-        if current is None:
-            current = seg.copy()
+    # 常见句子开头词（不应该合并）
+    common_starters = ('i ', "i'm ", "i'll ", "i've ", "i'd ", 'you ', 'we ', 'they ', 'he ', 'she ', 'it ')
+    
+    # 话题切换关键词
+    topic_shift_keywords = ('next up', 'another thing', 'also,', 'moving on', 'by the way', 
+                            'anyway', 'speaking of', 'on another note')
+    
+    # 句子开头词（不应该合并到前一句）
+    sentence_starters = ('so ', 'but ', 'and ', 'or ', 'next ', 'well ', 'okay ', 'now ', 
+                         'first ', 'second ', 'third ', 'finally ', 'however ', 'therefore ')
+    
+    for i, seg in enumerate(segments):
+        current_text = seg['text'].strip()
+        
+        # 如果 buffer 为空，开始新 buffer
+        if not buffer:
+            buffer.append(seg.copy())
             continue
         
-        current_text = current['text'].strip()
-        next_text = seg['text'].strip()
+        last_seg = buffer[-1]
+        last_text = last_seg['text'].strip()
         
-        # 检查合并后是否超限
-        new_duration = seg['end'] - current['start']
-        new_words = len(current_text.split()) + len(next_text.split())
-        
-        if new_duration > max_duration or new_words > max_words:
-            # 超限，保存当前段落
-            if not current_text.endswith(('.', '!', '?')):
-                current['text'] = current_text + '.'
-            merged.append(current)
-            current = seg.copy()
-            continue
-        
-        # 判断是否需要合并
+        # ========== 判断是否应该合并 ==========
         should_merge = False
         
-        # 规则1: 当前段以逗号、连接词或连字符结尾
-        if (current_text.endswith((',', ';', ':', '-', '...')) or
-            current_text.lower().endswith((' but', ' and', ' or', ' so', 
-                                           ' because', ' though', ' as', 
-                                           ' while', ' if', ' which', ' that'))):
-            should_merge = True
-        
-        # 规则2: 下一段以小写字母开头
-        elif next_text and next_text[0].islower():
-            # 排除 "i", "i'm" 等
-            first_word = next_text.split()[0].lower() if next_text.split() else ''
-            if first_word not in ('i', "i'm", "i'll", "i've", "i'd"):
+        # 1. 明显是同一句话被拆分（以小写开头）
+        if current_text and current_text[0].islower():
+            # 排除常见句子开头
+            if not any(current_text.lower().startswith(starter) for starter in common_starters):
                 should_merge = True
         
-        # 规则3: 当前段是明显的不完整短语
-        elif (len(current_text.split()) < 4 and 
-              not current_text.endswith(('.', '!', '?')) and
-              not current_text.lower().startswith(('so ', 'but ', 'and ', 'or '))):
+        # 2. 前一句以逗号、连词结尾
+        elif last_text.endswith((',', ';', '-', '...')):
+            should_merge = True
+        elif last_text.lower().endswith((' but', ' and', ' or', ' because', ' so', ' though', 
+                                          ' as', ' while', ' if', ' which', ' that', ' who',
+                                          ' where', ' when', ' to', ' of', ' for', ' with')):
             should_merge = True
         
-        # 规则4: 技术术语的延续
-        elif (current_text.lower().endswith(('export ', 'onready ', 'pr ', 'xr ', 'vs ')) or
-              next_text.lower().startswith(('variable', 'references', 'code'))):
+        # 3. 技术术语的延续
+        elif (last_text.lower().endswith(('export', 'onready', 'drag', 'quality', 'to', 
+                                           'the', 'a', 'an', 'this', 'that')) or
+              current_text.lower().startswith(('variable', 'references', 'and drop', 'of life', 'see'))):
             should_merge = True
         
-        # 规则5: 时间间隔很短（小于0.3秒）
-        elif seg['start'] - current['end'] < 0.3:
-            if not current_text.endswith(('.', '!', '?')):
+        # 4. 时间间隔非常短（<0.2秒）
+        elif seg['start'] - last_seg['end'] < 0.2:
+            if not last_text.endswith(('.', '!', '?')):
                 should_merge = True
         
+        # ========== 不应该合并的情况（覆盖上面的判断） ==========
+        
+        # 1. 合并后句子太长
+        combined_words = sum(len(s['text'].split()) for s in buffer) + len(current_text.split())
+        if combined_words > max_words:
+            should_merge = False
+        
+        # 2. 合并后字符数太多
+        combined_chars = sum(len(s['text']) for s in buffer) + len(current_text)
+        if combined_chars > max_chars:
+            should_merge = False
+        
+        # 3. 合并后时长太长
+        combined_duration = seg['end'] - buffer[0]['start']
+        if combined_duration > max_duration:
+            should_merge = False
+        
+        # 4. 当前文本是明显的句子开头
+        if current_text.lower().startswith(sentence_starters):
+            should_merge = False
+        
+        # 5. 话题切换的标志
+        if any(keyword in current_text.lower() for keyword in topic_shift_keywords):
+            should_merge = False
+        
+        # 执行合并或保存
         if should_merge:
-            # 合并文本
-            current_text_clean = current_text.rstrip('.,!?;:')
-            next_text_clean = next_text.lstrip()
-            
-            # 如果当前文本以连字符结尾，不要加空格
-            if current_text_clean.endswith('-'):
-                merged_text = current_text_clean + next_text_clean
-            else:
-                merged_text = current_text_clean + ' ' + next_text_clean
-            
-            current['text'] = merged_text
-            current['end'] = seg['end']
+            buffer.append(seg.copy())
         else:
-            # 确保当前段有正确的结束标点
-            if not current_text.endswith(('.', '!', '?')):
-                # 检查是否是问句
-                if any(q_word in current_text.lower() for q_word in ['?', 'what', 'how', 'why', 'where', 'when', 'who']):
-                    current['text'] = current_text + '?'
-                else:
-                    current['text'] = current_text + '.'
-            merged.append(current)
-            current = seg.copy()
+            # 保存 buffer 内容并开始新 buffer
+            merged_seg = _merge_segments_with_punctuation(buffer)
+            optimized.append(merged_seg)
+            buffer = [seg.copy()]
     
-    # 处理最后一段
-    if current:
-        current_text = current['text'].strip()
-        if not current_text.endswith(('.', '!', '?')):
-            current['text'] = current_text + '.'
-        merged.append(current)
+    # 处理剩余的 buffer
+    if buffer:
+        merged_seg = _merge_segments_with_punctuation(buffer)
+        optimized.append(merged_seg)
+    
+    return optimized
+
+
+def _merge_segments_with_punctuation(segments: List[Dict]) -> Dict:
+    """合并段落并智能添加标点"""
+    if not segments:
+        return None
+    
+    if len(segments) == 1:
+        seg = segments[0].copy()
+        text = seg['text'].strip()
+        # 确保有结束标点
+        if text and not text.endswith(('.', '!', '?')):
+            if any(q_word in text.lower() for q_word in ['?', 'what', 'how', 'why', 'who', 'where', 'when']):
+                text = text.rstrip('.,;:') + '?'
+            else:
+                text = text.rstrip('.,;:') + '.'
+        seg['text'] = text
+        return seg
+    
+    # 合并多个段落
+    merged_text = ' '.join(s['text'].strip() for s in segments)
+    
+    # 清理多余的标点和空格
+    merged_text = merged_text.replace(' .', '.').replace(' ,', ',')
+    merged_text = merged_text.replace(' ?', '?').replace(' !', '!')
+    merged_text = ' '.join(merged_text.split())  # 清理多余空格
+    
+    # 确保有合适的结束标点
+    if not merged_text.endswith(('.', '!', '?')):
+        if any(q_word in merged_text.lower() for q_word in ['?', 'what', 'how', 'why', 'who', 'where', 'when']):
+            merged_text = merged_text.rstrip('.,;:') + '?'
+        else:
+            merged_text = merged_text.rstrip('.,;:') + '.'
+    
+    # 合并词级时间戳
+    merged_words = []
+    for seg in segments:
+        if 'words' in seg:
+            merged_words.extend(seg.get('words', []))
+    
+    return {
+        'start': segments[0]['start'],
+        'end': segments[-1]['end'],
+        'text': merged_text,
+        'words': merged_words
+    }
+
+
+# ============================================================================
+# 长段落拆分
+# ============================================================================
+
+def split_by_sentence_boundary(text: str) -> List[str]:
+    """
+    按句子边界拆分（比简单的句号分割更智能）
+    
+    Args:
+        text: 原始文本
+        
+    Returns:
+        句子列表
+    """
+    # 保护特殊缩写和技术术语
+    protected_patterns = [
+        (r'(VS Code)\.', r'\1[DOT]'),
+        (r'(Node\.js)', r'Node[DOT]js'),
+        (r'(Next\.js)', r'Next[DOT]js'),
+        (r'(Vue\.js)', r'Vue[DOT]js'),
+        (r'(React\.js)', r'React[DOT]js'),
+        (r'(Express\.js)', r'Express[DOT]js'),
+        (r'(\d+)\.(\d+)', r'\1[DOT]\2'),  # 版本号
+        (r'(Mr|Mrs|Ms|Dr|Prof|Sr|Jr)\.', r'\1[DOT]'),  # 称谓
+        (r'(etc|vs|e\.g|i\.e)\.', r'\1[DOT]'),  # 常见缩写
+    ]
+    
+    for pattern, replacement in protected_patterns:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    
+    # 按句子边界拆分
+    # 模式：句号、问号、感叹号后跟空格和大写字母
+    pattern = r'(?<=[.!?])\s+(?=[A-Z])'
+    sentences = re.split(pattern, text)
+    
+    # 恢复保护的标记
+    sentences = [s.replace('[DOT]', '.') for s in sentences]
+    
+    return [s.strip() for s in sentences if s.strip()]
+
+
+def split_long_segment(segment: Dict, max_sentences: int = 2) -> List[Dict]:
+    """
+    拆分过长的段落
+    
+    Args:
+        segment: 原始段落
+        max_sentences: 每个段落最大句子数
+        
+    Returns:
+        拆分后的段落列表
+    """
+    text = segment['text']
+    start = segment['start']
+    end = segment['end']
+    duration = end - start
+    
+    sentences = split_by_sentence_boundary(text)
+    
+    if len(sentences) <= max_sentences:
+        return [segment]
+    
+    # 按句子拆分，重新分配时间
+    split_segments = []
+    total_chars = sum(len(s) for s in sentences)
+    current_start = start
+    
+    for i in range(0, len(sentences), max_sentences):
+        segment_sentences = sentences[i:i + max_sentences]
+        segment_text = ' '.join(segment_sentences)
+        
+        # 按字符数比例分配时间
+        segment_chars = sum(len(s) for s in segment_sentences)
+        segment_duration = duration * (segment_chars / total_chars) if total_chars > 0 else duration / len(sentences)
+        
+        split_segments.append({
+            'start': current_start,
+            'end': current_start + segment_duration,
+            'text': segment_text,
+            'words': []
+        })
+        
+        current_start += segment_duration
+    
+    return split_segments
+
+
+def optimize_tech_discussion_segments(segments: List[Dict], 
+                                       max_sentences: int = 2) -> List[Dict]:
+    """
+    专门优化技术讨论的段落
+    
+    Args:
+        segments: 段落列表
+        max_sentences: 每个段落最大句子数
+        
+    Returns:
+        优化后的段落列表
+    """
+    optimized = []
+    
+    for seg in segments:
+        text = seg['text']
+        sentences = split_by_sentence_boundary(text)
+        
+        if len(sentences) <= max_sentences:
+            # 1-2 个句子，保持原样
+            optimized.append(seg)
+        else:
+            # 将长段落拆分成多个短段落
+            split_segs = split_long_segment(seg, max_sentences)
+            optimized.extend(split_segs)
+    
+    return optimized
+
+
+def intelligent_segmentation(segments: List[Dict],
+                              max_words: int = 25,
+                              max_chars: int = 150,
+                              max_duration: float = 10.0,
+                              split_long: bool = True,
+                              max_sentences: int = 2) -> List[Dict]:
+    """
+    完整的智能分段流程
+    
+    Args:
+        segments: 原始段落列表
+        max_words: 最大词数
+        max_chars: 最大字符数
+        max_duration: 最大时长
+        split_long: 是否拆分过长段落
+        max_sentences: 拆分时每段最大句子数
+        
+    Returns:
+        优化后的段落列表
+    """
+    if not segments:
+        return segments
+    
+    # 1. 智能合并
+    merged = intelligent_merge_segments(
+        segments, 
+        max_duration=max_duration,
+        max_words=max_words,
+        max_chars=max_chars
+    )
+    
+    # 2. 拆分过长段落（可选）
+    if split_long:
+        merged = optimize_tech_discussion_segments(merged, max_sentences=max_sentences)
     
     return merged
 
 
+# 保留旧函数名的兼容性
+def _merge_buffer_segments(buffer: List[Dict]) -> Dict:
+    """兼容性函数 - 使用新的合并函数"""
+    return _merge_segments_with_punctuation(buffer)
+
+
+# 继续原有代码
 def realtime_optimization(segments: List[Dict], lookahead: int = 2) -> List[Dict]:
     """
     实时优化 ASR 输出（适合流式处理）
@@ -1675,6 +1889,628 @@ def realtime_optimization(segments: List[Dict], lookahead: int = 2) -> List[Dict
         i += 1 + merge_count
     
     return optimized
+
+
+# ============================================================================
+# 完整优化策略
+# ============================================================================
+
+def split_by_sentences_with_timing(segment: Dict, 
+                                    sentences: List[str], 
+                                    max_sentences: int = 2) -> List[Dict]:
+    """
+    按句子拆分段落并重新分配时间
+    
+    Args:
+        segment: 原始段落
+        sentences: 已拆分的句子列表
+        max_sentences: 每段最大句子数
+        
+    Returns:
+        拆分后的段落列表
+    """
+    if len(sentences) <= max_sentences:
+        return [segment]
+    
+    start = segment['start']
+    end = segment['end']
+    duration = end - start
+    total_chars = sum(len(s) for s in sentences)
+    
+    split_segments = []
+    current_start = start
+    
+    for i in range(0, len(sentences), max_sentences):
+        segment_sentences = sentences[i:i + max_sentences]
+        segment_text = ' '.join(segment_sentences)
+        
+        # 按字符数比例分配时间
+        segment_chars = sum(len(s) for s in segment_sentences)
+        segment_duration = duration * (segment_chars / total_chars) if total_chars > 0 else duration / len(sentences)
+        
+        split_segments.append({
+            'start': current_start,
+            'end': current_start + segment_duration,
+            'text': segment_text,
+            'words': []
+        })
+        
+        current_start += segment_duration
+    
+    return split_segments
+
+
+def split_by_punctuation(segment: Dict, max_words: int = 20) -> List[Dict]:
+    """
+    按标点符号智能切分长句子
+    
+    优先在逗号、分号处切分，确保每段不超过 max_words
+    
+    Args:
+        segment: 原始段落
+        max_words: 每段最大词数
+        
+    Returns:
+        拆分后的段落列表
+    """
+    text = segment['text'].strip()
+    words = text.split()
+    
+    if len(words) <= max_words:
+        return [segment]
+    
+    start = segment['start']
+    end = segment['end']
+    duration = end - start
+    total_chars = len(text)
+    
+    # 找到所有可能的切分点（标点符号位置）
+    split_points = []
+    
+    # 优先级：句号 > 分号 > 逗号
+    # 找逗号位置
+    for i, char in enumerate(text):
+        if char == ',':
+            # 计算逗号前的词数
+            words_before = len(text[:i+1].split())
+            split_points.append({
+                'pos': i + 1,  # 包含逗号
+                'priority': 1,  # 逗号优先级低
+                'words_before': words_before
+            })
+        elif char == ';':
+            words_before = len(text[:i+1].split())
+            split_points.append({
+                'pos': i + 1,
+                'priority': 2,  # 分号优先级中
+                'words_before': words_before
+            })
+        elif char == '.' and i < len(text) - 1 and text[i+1] == ' ':
+            # 句号后面有空格（排除缩写如 "Mr."）
+            words_before = len(text[:i+1].split())
+            split_points.append({
+                'pos': i + 1,
+                'priority': 3,  # 句号优先级高
+                'words_before': words_before
+            })
+    
+    if not split_points:
+        # 没有标点，按词数切分
+        return split_by_word_count(segment, max_words)
+    
+    # 选择最佳切分点
+    split_segments = []
+    current_start_pos = 0
+    current_start_time = start
+    
+    while current_start_pos < len(text):
+        remaining_text = text[current_start_pos:].strip()
+        remaining_words = len(remaining_text.split())
+        
+        if remaining_words <= max_words:
+            # 剩余部分不需要切分
+            chunk_text = remaining_text
+            if chunk_text:
+                # 确保有结束标点
+                if not chunk_text.endswith(('.', '!', '?')):
+                    chunk_text = chunk_text.rstrip('.,;:') + '.'
+                
+                # 计算时间
+                char_ratio = len(remaining_text) / total_chars if total_chars > 0 else 0
+                segment_duration = duration * char_ratio
+                
+                split_segments.append({
+                    'start': current_start_time,
+                    'end': end,
+                    'text': chunk_text,
+                    'words': []
+                })
+            break
+        
+        # 找到最佳切分点
+        best_point = None
+        min_diff = float('inf')
+        
+        for point in split_points:
+            if point['pos'] <= current_start_pos:
+                continue
+            
+            words_in_chunk = point['words_before'] - len(text[:current_start_pos].split())
+            
+            # 选择最接近 max_words 但不超过的切分点
+            if words_in_chunk <= max_words:
+                diff = max_words - words_in_chunk
+                # 优先选择优先级高的标点
+                adjusted_diff = diff - point['priority'] * 0.1
+                if adjusted_diff < min_diff:
+                    min_diff = adjusted_diff
+                    best_point = point
+        
+        if best_point is None:
+            # 没有合适的切分点，强制按词数切分
+            words_list = remaining_text.split()
+            chunk_text = ' '.join(words_list[:max_words])
+            if not chunk_text.endswith(('.', '!', '?', ',')):
+                chunk_text = chunk_text + ','
+            
+            char_ratio = len(chunk_text) / total_chars if total_chars > 0 else 0
+            segment_duration = duration * char_ratio
+            
+            split_segments.append({
+                'start': current_start_time,
+                'end': current_start_time + segment_duration,
+                'text': chunk_text.strip(),
+                'words': []
+            })
+            
+            current_start_pos += len(chunk_text)
+            current_start_time += segment_duration
+        else:
+            # 使用找到的切分点
+            chunk_text = text[current_start_pos:best_point['pos']].strip()
+            
+            # 计算时间
+            char_ratio = len(chunk_text) / total_chars if total_chars > 0 else 0
+            segment_duration = duration * char_ratio
+            
+            split_segments.append({
+                'start': current_start_time,
+                'end': current_start_time + segment_duration,
+                'text': chunk_text,
+                'words': []
+            })
+            
+            current_start_pos = best_point['pos']
+            current_start_time += segment_duration
+    
+    # 清理：确保每段都有正确的标点
+    for seg in split_segments:
+        text = seg['text'].strip()
+        if text and not text.endswith(('.', '!', '?')):
+            # 如果是最后一段，加句号；否则保持逗号
+            if seg == split_segments[-1]:
+                seg['text'] = text.rstrip('.,;:') + '.'
+    
+    return split_segments if split_segments else [segment]
+
+
+def split_by_word_count(segment: Dict, max_words: int = 25) -> List[Dict]:
+    """
+    按词数拆分段落（备用方案）
+    
+    Args:
+        segment: 原始段落
+        max_words: 每段最大词数
+        
+    Returns:
+        拆分后的段落列表
+    """
+    text = segment['text']
+    words = text.split()
+    
+    if len(words) <= max_words:
+        return [segment]
+    
+    start = segment['start']
+    end = segment['end']
+    duration = end - start
+    
+    split_segments = []
+    total_words = len(words)
+    
+    for i in range(0, total_words, max_words):
+        chunk_words = words[i:i + max_words]
+        chunk_text = ' '.join(chunk_words)
+        
+        # 按词数比例分配时间
+        ratio_start = i / total_words
+        ratio_end = min((i + len(chunk_words)) / total_words, 1.0)
+        
+        # 确保有结束标点
+        if not chunk_text.endswith(('.', '!', '?')):
+            chunk_text = chunk_text.rstrip('.,;:') + '.'
+        
+        split_segments.append({
+            'start': start + duration * ratio_start,
+            'end': start + duration * ratio_end,
+            'text': chunk_text,
+            'words': []
+        })
+    
+    return split_segments
+
+
+def split_overlong_paragraphs(segments: List[Dict], 
+                               max_sentences: int = 3, 
+                               max_words: int = 30) -> List[Dict]:
+    """
+    拆分过长的段落
+    
+    Args:
+        segments: 段落列表
+        max_sentences: 每段最大句子数
+        max_words: 每段最大词数
+        
+    Returns:
+        拆分后的段落列表
+    """
+    # 话题切换关键词
+    topic_shifts = ('next up', 'also,', 'another', 'by the way', 'anyway', 
+                    'moving on', 'speaking of', 'on another note')
+    
+    optimized = []
+    
+    for seg in segments:
+        text = seg['text']
+        words = text.split()
+        
+        # 检查是否需要拆分
+        needs_split = False
+        
+        # 规则1：词数过多
+        if len(words) > max_words:
+            needs_split = True
+        
+        # 规则2：句子数过多
+        sentences = split_by_sentence_boundary(text)
+        if len(sentences) > max_sentences:
+            needs_split = True
+        
+        # 规则3：包含明显的话题切换
+        if any(shift in text.lower() for shift in topic_shifts) and len(sentences) > 2:
+            needs_split = True
+        
+        if needs_split:
+            # 优先按句子拆分
+            if len(sentences) > 1:
+                split_segs = split_by_sentences_with_timing(seg, sentences, max_sentences)
+                # 检查拆分后的段落是否仍然过长
+                final_segs = []
+                for s in split_segs:
+                    if len(s['text'].split()) > max_words:
+                        # 按标点进一步拆分
+                        final_segs.extend(split_by_punctuation(s, max_words))
+                    else:
+                        final_segs.append(s)
+                optimized.extend(final_segs)
+            else:
+                # 如果只有一个长句，优先按标点拆分
+                split_segs = split_by_punctuation(seg, max_words)
+                optimized.extend(split_segs)
+        else:
+            optimized.append(seg)
+    
+    return optimized
+
+
+def intelligent_merge_short_fragments(segments: List[Dict],
+                                       min_words: int = 5,
+                                       max_words: int = 25) -> List[Dict]:
+    """
+    智能合并过短的片段
+    
+    Args:
+        segments: 段落列表
+        min_words: 最小词数（低于此值考虑合并）
+        max_words: 合并后最大词数
+        
+    Returns:
+        合并后的段落列表
+    """
+    if not segments:
+        return segments
+    
+    merged = []
+    buffer = None
+    
+    for seg in segments:
+        text = seg['text'].strip()
+        word_count = len(text.split())
+        
+        if buffer is None:
+            buffer = seg.copy()
+            continue
+        
+        buffer_text = buffer['text'].strip()
+        buffer_words = len(buffer_text.split())
+        
+        # 判断是否应该合并
+        should_merge = False
+        
+        # 当前 buffer 太短
+        if buffer_words < min_words:
+            should_merge = True
+        
+        # 当前段落太短
+        if word_count < min_words:
+            should_merge = True
+        
+        # 当前段落以小写开头（可能是前一句的延续）
+        if text and text[0].islower():
+            should_merge = True
+        
+        # 检查合并后是否超限
+        combined_words = buffer_words + word_count
+        if combined_words > max_words:
+            should_merge = False
+        
+        if should_merge:
+            # 合并
+            buffer['text'] = buffer_text.rstrip('.,;:') + ' ' + text
+            buffer['end'] = seg['end']
+        else:
+            # 保存 buffer 并开始新的
+            if not buffer_text.endswith(('.', '!', '?')):
+                buffer['text'] = buffer_text + '.'
+            merged.append(buffer)
+            buffer = seg.copy()
+    
+    # 处理最后的 buffer
+    if buffer:
+        buffer_text = buffer['text'].strip()
+        if not buffer_text.endswith(('.', '!', '?')):
+            buffer['text'] = buffer_text + '.'
+        merged.append(buffer)
+    
+    return merged
+
+
+def final_formatting(segments: List[Dict]) -> List[Dict]:
+    """
+    最终格式化和标点修正
+    
+    Args:
+        segments: 段落列表
+        
+    Returns:
+        格式化后的段落列表
+    """
+    for seg in segments:
+        text = seg['text'].strip()
+        
+        # 清理多余空格
+        text = ' '.join(text.split())
+        
+        # 修复标点空格
+        text = re.sub(r'\s+([.,!?;:])', r'\1', text)
+        text = re.sub(r'([.,!?;:])(?=[A-Za-z])', r'\1 ', text)
+        
+        # 修复重复标点
+        text = re.sub(r'([.,!?])\1+', r'\1', text)
+        
+        # 确保句首大写
+        if text and text[0].isalpha():
+            text = text[0].upper() + text[1:]
+        
+        # 确保有结束标点
+        if text and not text.endswith(('.', '!', '?')):
+            # 检查是否是问句
+            if any(q in text.lower() for q in ['what', 'how', 'why', 'who', 'where', 'when', '?']):
+                text = text.rstrip('.,;:') + '?'
+            else:
+                text = text.rstrip('.,;:') + '.'
+        
+        seg['text'] = text
+    
+    return segments
+
+
+def complete_optimization_strategy(segments: List[Dict],
+                                    max_words: int = 20,
+                                    max_sentences: int = 2,
+                                    min_words: int = 5,
+                                    use_external_dict: bool = True) -> Tuple[List[Dict], Dict]:
+    """
+    完整的四阶段优化策略
+    
+    阶段1: 修正明显错误
+    阶段2: 智能合并过短片段
+    阶段3: 合理拆分过长段落（按句子）
+    阶段4: 按标点切分超长句子
+    阶段5: 最终格式化和标点修正
+    
+    Args:
+        segments: 原始段落列表
+        max_words: 最大词数（默认20，适合TTS）
+        max_sentences: 最大句子数（默认2）
+        min_words: 最小词数
+        use_external_dict: 是否使用外部词库
+        
+    Returns:
+        (优化后的段落列表, 质量指标)
+    """
+    if not segments:
+        return segments, {}
+    
+    original_count = len(segments)
+    
+    # 阶段1：修正明显错误
+    if use_external_dict and DICT_MANAGER_AVAILABLE:
+        try:
+            dm = get_dictionary_manager()
+            segments = dm.correct_segments(segments)
+        except Exception:
+            pass
+    
+    # 阶段2：智能合并过短片段
+    segments = intelligent_merge_short_fragments(segments, min_words=min_words, max_words=max_words)
+    after_merge_count = len(segments)
+    
+    # 阶段3：合理拆分过长段落（按句子）
+    segments = split_overlong_paragraphs(segments, max_sentences=max_sentences, max_words=max_words)
+    
+    # 阶段4：按标点切分仍然过长的句子
+    final_segments = []
+    for seg in segments:
+        word_count = len(seg['text'].split())
+        if word_count > max_words:
+            # 按标点切分
+            split_segs = split_by_punctuation(seg, max_words)
+            final_segments.extend(split_segs)
+        else:
+            final_segments.append(seg)
+    segments = final_segments
+    after_split_count = len(segments)
+    
+    # 阶段4：最终格式化
+    segments = final_formatting(segments)
+    
+    # 评估质量
+    quality = evaluate_segment_quality_detailed(segments)
+    quality['original_count'] = original_count
+    quality['after_merge_count'] = after_merge_count
+    quality['after_split_count'] = after_split_count
+    quality['final_count'] = len(segments)
+    
+    return segments, quality
+
+
+def evaluate_segment_quality_detailed(segments: List[Dict]) -> Dict:
+    """
+    详细评估段落质量
+    
+    评估标准：
+    - 优秀: 10-20词，1-2个句子
+    - 良好: 5-25词，1-3个句子
+    - 一般: 26-35词
+    - 需改进: >35词或<5词
+    
+    Args:
+        segments: 段落列表
+        
+    Returns:
+        质量指标字典
+    """
+    if not segments:
+        return {
+            'total': 0,
+            'excellent': 0,
+            'good': 0,
+            'fair': 0,
+            'poor': 0,
+            'quality_score': 0
+        }
+    
+    quality_metrics = {
+        'excellent': 0,
+        'good': 0,
+        'fair': 0,
+        'poor': 0
+    }
+    
+    word_counts = []
+    durations = []
+    
+    for seg in segments:
+        text = seg['text']
+        words = text.split()
+        word_count = len(words)
+        word_counts.append(word_count)
+        
+        duration = seg.get('end', 0) - seg.get('start', 0)
+        durations.append(duration)
+        
+        sentences = split_by_sentence_boundary(text)
+        sentence_count = len(sentences)
+        
+        # 评估质量等级
+        if 10 <= word_count <= 20 and 1 <= sentence_count <= 2:
+            quality_metrics['excellent'] += 1
+        elif 5 <= word_count <= 25 and 1 <= sentence_count <= 3:
+            quality_metrics['good'] += 1
+        elif 26 <= word_count <= 35:
+            quality_metrics['fair'] += 1
+        else:
+            quality_metrics['poor'] += 1
+    
+    total = len(segments)
+    
+    # 计算质量分数 (0-100)
+    quality_score = (
+        quality_metrics['excellent'] * 100 +
+        quality_metrics['good'] * 80 +
+        quality_metrics['fair'] * 50 +
+        quality_metrics['poor'] * 20
+    ) / total
+    
+    return {
+        'total': total,
+        'excellent': quality_metrics['excellent'],
+        'good': quality_metrics['good'],
+        'fair': quality_metrics['fair'],
+        'poor': quality_metrics['poor'],
+        'excellent_ratio': round(quality_metrics['excellent'] / total, 3),
+        'good_ratio': round(quality_metrics['good'] / total, 3),
+        'avg_words': round(sum(word_counts) / total, 1),
+        'avg_duration': round(sum(durations) / total, 2),
+        'word_range': (min(word_counts), max(word_counts)),
+        'quality_score': round(quality_score, 1)
+    }
+
+
+def print_quality_report(quality: Dict):
+    """打印质量报告"""
+    print("\n" + "=" * 50)
+    print("段落质量分析报告")
+    print("=" * 50)
+    
+    total = quality.get('total', 0)
+    if total == 0:
+        print("无段落数据")
+        return
+    
+    print(f"总段落数: {total}")
+    
+    if 'original_count' in quality:
+        print(f"  原始: {quality['original_count']} -> 合并后: {quality.get('after_merge_count', 'N/A')} -> 最终: {quality.get('final_count', total)}")
+    
+    print(f"\n词数统计:")
+    print(f"  平均词数: {quality.get('avg_words', 'N/A')}")
+    print(f"  词数范围: {quality.get('word_range', 'N/A')}")
+    print(f"  平均时长: {quality.get('avg_duration', 'N/A')}s")
+    
+    print(f"\n质量分布:")
+    print(f"  优秀 (10-20词, 1-2句): {quality['excellent']}/{total} ({quality.get('excellent_ratio', 0)*100:.1f}%)")
+    print(f"  良好 (5-25词, 1-3句):  {quality['good']}/{total} ({quality.get('good_ratio', 0)*100:.1f}%)")
+    print(f"  一般 (26-35词):        {quality['fair']}/{total}")
+    print(f"  需改进 (>35或<5词):    {quality['poor']}/{total}")
+    
+    print(f"\n综合质量分数: {quality.get('quality_score', 0)}/100")
+    
+    # 评级
+    score = quality.get('quality_score', 0)
+    if score >= 90:
+        grade = "A (优秀)"
+    elif score >= 80:
+        grade = "B (良好)"
+    elif score >= 70:
+        grade = "C (一般)"
+    elif score >= 60:
+        grade = "D (较差)"
+    else:
+        grade = "F (需改进)"
+    print(f"质量等级: {grade}")
+    print("=" * 50 + "\n")
 
 
 def evaluate_srt_quality(srt_content: str) -> Tuple[float, Dict]:
@@ -1750,7 +2586,7 @@ def process_srt_file(input_path: str, output_path: str = None) -> str:
 # ============================================================================
 
 if __name__ == "__main__":
-    # 测试数据 - 包含常见 ASR 错误
+    # 测试数据 - 包含常见 ASR 错误和长句子
     test_segments = [
         {"start": 0.0, "end": 3.2, "text": "So I wasn't going to make a second video today, but Godot"},
         {"start": 3.2, "end": 5.099, "text": "4.6 Dev 1 just dropped,"},
@@ -1769,6 +2605,9 @@ if __name__ == "__main__":
         {"start": 32.1, "end": 34.0, "text": "features for the commUnity."},
         {"start": 34.2, "end": 36.5, "text": "Check out the on ready variable and F keys support."},
         {"start": 36.6, "end": 38.0, "text": "Also the drag and drop export variable works now."},
+        # 添加长句子测试用例
+        {"start": 165.5, "end": 174.699, "text": "Joypad. While it's common for programs to have significant overlap between registering inputs of these types, it's not uncommon for systems to deliberately stylize the two types separately, often handling their."},
+        {"start": 296.22, "end": 305.259, "text": "Let me know if you guys prefer using exported references or onready variables. I find a lot of people like onreadies over export and I honestly prefer export like."},
     ]
     
     print("=" * 60)
@@ -1779,23 +2618,25 @@ if __name__ == "__main__":
     for i, seg in enumerate(test_segments, 1):
         print(f"  {i:2d}. [{seg['start']:5.1f}s - {seg['end']:5.1f}s] {seg['text']}")
     
+    # 测试完整优化策略
     print("\n" + "-" * 60)
-    print("运行完整优化流程...")
+    print("测试完整优化策略 (complete_optimization_strategy)...")
     print("-" * 60)
     
-    # 运行完整优化流程
-    optimized, metrics = full_optimization_pipeline(
-        test_segments,
-        min_duration=1.5,
-        max_duration=8.0,
-        min_words=4,
+    optimized, quality = complete_optimization_strategy(
+        test_segments.copy(),
         max_words=20,
-        verbose=True
+        max_sentences=2,
+        min_words=5,
+        use_external_dict=True
     )
     
     print("\n优化后段落:")
     for i, seg in enumerate(optimized, 1):
         print(f"  {i:2d}. [{seg['start']:5.1f}s - {seg['end']:5.1f}s] {seg['text']}")
+    
+    # 打印质量报告
+    print_quality_report(quality)
     
     # 测试 SRT 处理
     print("\n" + "=" * 60)

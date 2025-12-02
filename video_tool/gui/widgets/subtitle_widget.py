@@ -168,7 +168,17 @@ class SubtitleWidget(QWidget):
         self.load_settings()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(self)
+        
+        # 创建滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        
+        # 滚动区域内的容器
+        scroll_widget = QWidget()
+        layout = QVBoxLayout(scroll_widget)
+        layout.setContentsMargins(0, 0, 5, 0)  # 右边留点空间给滚动条
         
         # 输入文件组
         input_group = QGroupBox("字幕文件")
@@ -191,6 +201,12 @@ class SubtitleWidget(QWidget):
         self.engine_combo.addItems(["Deepseek", "LongCat", "OpenRouter", "DeepLX (非AI)", "自定义第三方"])
         self.engine_combo.currentIndexChanged.connect(self.on_engine_changed)
         engine_row.addWidget(self.engine_combo)
+        
+        # 测试连接按钮放在引擎选择右边
+        self.test_connection_btn = QPushButton("测试连接")
+        self.test_connection_btn.clicked.connect(self.test_api_connection)
+        self.test_connection_btn.setMinimumWidth(100)
+        engine_row.addWidget(self.test_connection_btn)
         engine_row.addStretch()
         
         api_url_row = QHBoxLayout()
@@ -217,10 +233,15 @@ class SubtitleWidget(QWidget):
         self.model_edit.editingFinished.connect(self.save_settings)
         model_row.addWidget(self.model_edit)
         
+        # 连接状态
+        self.connection_status = QLabel("")
+        self.connection_status.setStyleSheet("color: gray; font-size: 10px;")
+        
         engine_layout.addLayout(engine_row)
         engine_layout.addLayout(api_url_row)
         engine_layout.addLayout(api_key_row)
         engine_layout.addLayout(model_row)
+        engine_layout.addWidget(self.connection_status)
         engine_group.setLayout(engine_layout)
         
         # Prompt 设置组
@@ -358,15 +379,6 @@ class SubtitleWidget(QWidget):
         operation_group = QGroupBox("翻译操作")
         operation_layout = QVBoxLayout()
         
-        test_layout = QHBoxLayout()
-        self.test_connection_btn = QPushButton("测试连接")
-        self.test_connection_btn.clicked.connect(self.test_connection)
-        self.connection_status = QLabel("未测试")
-        self.connection_status.setStyleSheet("color: gray;")
-        test_layout.addWidget(self.test_connection_btn)
-        test_layout.addWidget(self.connection_status)
-        test_layout.addStretch()
-        
         translate_layout = QHBoxLayout()
         translate_layout.addWidget(QLabel("翻译到:"))
         self.lang_combo = QComboBox()
@@ -392,16 +404,40 @@ class SubtitleWidget(QWidget):
         self.interval_spin.valueChanged.connect(self.save_settings)
         translate_layout.addWidget(self.interval_spin)
         
-        self.translate_btn = QPushButton("开始翻译并保存")
+        self.translate_btn = QPushButton("开始翻译")
         self.translate_btn.clicked.connect(self.translate_and_save)
+        self.translate_btn.setMinimumWidth(120)
+        self.translate_btn.setMinimumHeight(32)
+        self.translate_btn.setStyleSheet("font-weight: bold; font-size: 13px;")
         translate_layout.addWidget(self.translate_btn)
         translate_layout.addStretch()
+        
+        # 保存选项
+        save_options_layout = QHBoxLayout()
+        save_options_layout.addWidget(QLabel("保存选项:"))
+        
+        self.save_cn_check = QCheckBox("中文字幕")
+        self.save_cn_check.setChecked(True)
+        self.save_cn_check.setToolTip("保存翻译后的中文字幕 (_cn.srt)")
+        save_options_layout.addWidget(self.save_cn_check)
+        
+        self.save_en_check = QCheckBox("英文字幕")
+        self.save_en_check.setChecked(True)
+        self.save_en_check.setToolTip("保存原始英文字幕 (_en.srt)")
+        save_options_layout.addWidget(self.save_en_check)
+        
+        self.save_bilingual_check = QCheckBox("双语字幕")
+        self.save_bilingual_check.setChecked(True)
+        self.save_bilingual_check.setToolTip("保存中英双语字幕 (_bilingual.srt)")
+        save_options_layout.addWidget(self.save_bilingual_check)
+        
+        save_options_layout.addStretch()
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         
-        operation_layout.addLayout(test_layout)
         operation_layout.addLayout(translate_layout)
+        operation_layout.addLayout(save_options_layout)
         operation_layout.addWidget(self.progress_bar)
         operation_group.setLayout(operation_layout)
         
@@ -412,6 +448,10 @@ class SubtitleWidget(QWidget):
         layout.addWidget(style_group)
         layout.addWidget(operation_group)
         layout.addStretch()
+        
+        # 设置滚动区域
+        scroll_area.setWidget(scroll_widget)
+        main_layout.addWidget(scroll_area)
         
         self.update_preview()
 
@@ -549,10 +589,20 @@ class SubtitleWidget(QWidget):
             self.prompt_preview.setPlaceholderText("使用默认 Prompt (根据目标语言自动生成)")
         else:
             filename = self.prompt_combo.currentText()
-            filepath = os.path.join(self.prompt_dir, filename)
-            if os.path.exists(filepath):
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    self.prompt_preview.setPlainText(f.read())
+            if filename and filename != "默认 (自动)":
+                filepath = os.path.join(self.prompt_dir, filename)
+                if os.path.exists(filepath):
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            self.prompt_preview.setPlainText(f.read())
+                    except Exception as e:
+                        self.log(f"读取 Prompt 文件失败: {e}")
+                        self.prompt_preview.clear()
+                else:
+                    self.prompt_preview.clear()
+                    self.prompt_preview.setPlaceholderText("Prompt 文件不存在")
+            else:
+                self.prompt_preview.clear()
     
     def on_style_changed(self):
         """样式变化时更新预览并保存"""
@@ -619,7 +669,8 @@ class SubtitleWidget(QWidget):
             self.model_edit.text().strip()
         )
     
-    def test_connection(self):
+    def test_api_connection(self):
+        """测试 API 连接"""
         self.test_connection_btn.setEnabled(False)
         self.connection_status.setText("测试中...")
         self.connection_status.setStyleSheet("color: orange;")
@@ -764,30 +815,41 @@ class SubtitleWidget(QWidget):
         lang_suffix_map = {"zh": "chs", "ja": "jpn", "ko": "kor", "en": "eng"}
         lang_suffix = lang_suffix_map.get(lang_code, lang_code)
         
-        translated_path = f"{base_path}.{lang_suffix}.srt"
-        try:
-            self.manager.save_srt(translated_subs, translated_path)
-            self.log(f"✓ 已保存翻译字幕: {translated_path}")
-        except Exception as e:
-            self.log(f"✗ 保存翻译字幕失败: {e}")
+        saved_files = []
         
-        original_path = f"{base_path}.eng.srt"
-        try:
-            self.manager.save_srt(original_subs, original_path)
-            self.log(f"✓ 已保存原文字幕: {original_path}")
-        except Exception as e:
-            self.log(f"✗ 保存原文字幕失败: {e}")
+        # 保存中文/翻译字幕
+        if self.save_cn_check.isChecked():
+            translated_path = f"{base_path}_{lang_suffix}.srt"
+            try:
+                self.manager.save_srt(translated_subs, translated_path)
+                self.log(f"✓ 已保存翻译字幕: {translated_path}")
+                saved_files.append(translated_path)
+            except Exception as e:
+                self.log(f"✗ 保存翻译字幕失败: {e}")
         
-        bilingual_path = f"{base_path}.{lang_suffix}_eng.ass"
-        try:
-            bilingual_subs = self.manager.merge_subtitles(translated_subs, original_subs)
-            self.save_ass(bilingual_subs, bilingual_path)
-            self.log(f"✓ 已保存双语字幕: {bilingual_path}")
-        except Exception as e:
-            self.log(f"✗ 保存双语字幕失败: {e}")
+        # 保存英文/原文字幕
+        if self.save_en_check.isChecked():
+            original_path = f"{base_path}_en.srt"
+            try:
+                self.manager.save_srt(original_subs, original_path)
+                self.log(f"✓ 已保存原文字幕: {original_path}")
+                saved_files.append(original_path)
+            except Exception as e:
+                self.log(f"✗ 保存原文字幕失败: {e}")
+        
+        # 保存双语字幕
+        if self.save_bilingual_check.isChecked():
+            bilingual_path = f"{base_path}_{lang_suffix}_en.ass"
+            try:
+                bilingual_subs = self.manager.merge_subtitles(translated_subs, original_subs)
+                self.save_ass(bilingual_subs, bilingual_path)
+                self.log(f"✓ 已保存双语字幕: {bilingual_path}")
+                saved_files.append(bilingual_path)
+            except Exception as e:
+                self.log(f"✗ 保存双语字幕失败: {e}")
         
         self.log("=" * 50)
-        self.log("全部完成!")
+        self.log(f"全部完成! 共保存 {len(saved_files)} 个文件")
         
         if untranslated_count > 0:
             self.log(f"\n提示: 如需重新翻译未成功的部分，可以降低并发数后重试")

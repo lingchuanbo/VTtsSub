@@ -2,29 +2,30 @@ import os
 import datetime
 
 class ASRProcessor:
-    def __init__(self, model_size="base", engine_type="whisper", api_key=None, api_url=None):
+    def __init__(self, model_size="large-v3-turbo", engine_type="faster-whisper", api_key=None, api_url=None):
         """
         Initialize the ASR processor.
         
         Args:
-            model_size (str): Whisper model size or Qwen model name
-            engine_type (str): "whisper", "faster-whisper", "elevenlabs", or "qwen"
-            api_key (str): API key (required for elevenlabs and qwen)
-            api_url (str): API URL for Qwen (optional)
+            model_size (str): Whisper model size (tiny/base/small/medium/large-v2/large-v3/large-v3-turbo)
+            engine_type (str): "faster-whisper" (推荐) 或 "whisper" (兼容)
+            api_key (str): 保留参数（未使用）
+            api_url (str): 保留参数（未使用）
         """
         self.model_size = model_size
-        self.engine_type = engine_type
+        # 强制使用 faster-whisper
+        self.engine_type = "faster-whisper" if engine_type in ("faster-whisper", "whisper") else "faster-whisper"
         self.api_key = api_key
-        self.api_url = api_url or "https://dashscope-intl.aliyuncs.com/api/v1"
+        self.api_url = api_url
         self.model = None
         # 断句参数
         self.pause_threshold = 0.5  # 停顿阈值（秒）
-        self.max_words_per_segment = 12  # 每段最大词数
+        self.max_words_per_segment = 20  # 每段最大词数
         # VAD 参数
         self.use_vad = True
         self.vad_threshold = 0.5
         # Faster-Whisper 参数
-        self.compute_type = "auto"  # auto/float16/int8
+        self.compute_type = "float16"  # GPU 使用 float16
 
     def transcribe(self, audio_path, output_srt_path=None, language_code=None, diarize=False):
         """
@@ -43,14 +44,8 @@ class ASRProcessor:
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-        if self.engine_type == "elevenlabs":
-            segments = self._transcribe_elevenlabs(audio_path, language_code, diarize)
-        elif self.engine_type == "qwen":
-            segments = self._transcribe_qwen(audio_path, language_code)
-        elif self.engine_type == "faster-whisper":
-            segments = self._transcribe_faster_whisper(audio_path, language_code)
-        else:
-            segments = self._transcribe_whisper(audio_path)
+        # 使用 Faster-Whisper 进行转录
+        segments = self._transcribe_faster_whisper(audio_path, language_code)
         
         if output_srt_path:
             self._save_as_srt(segments, output_srt_path)
