@@ -18,16 +18,36 @@ class ASRProcessor:
         self.api_key = api_key
         self.api_url = api_url
         self.model = None
-        # 断句参数
-        self.pause_threshold = 0.5  # 停顿阈值（秒）
-        self.max_words_per_segment = 20  # 每段最大词数
+        # 断句参数 - 优化为更短的字幕
+        self.pause_threshold = 0.6  # 停顿阈值（秒），更敏感的断句
+        self.max_words_per_segment = 18  # 每段最大词数，控制字幕长度
+        self.max_segment_duration = 7.0  # 每段最大时长（秒）
         # VAD 参数
         self.use_vad = True
         self.vad_threshold = 0.5
         # Faster-Whisper 参数
         self.compute_type = "float16"  # GPU 使用 float16
+        # Prompt 提示词（帮助识别专有名词）
+        self.initial_prompt = None  # 可通过 set_prompt() 设置
+        
+    def set_prompt(self, prompt: str):
+        """设置 Whisper prompt，帮助识别专有名词"""
+        self.initial_prompt = prompt
+        
+    def set_tech_prompt(self, domain: str = "godot"):
+        """设置技术领域的预设 prompt"""
+        prompts = {
+            "godot": "Godot, GDScript, Node, Scene, Signal, Export, OnReady, TileMap, Wayland, OpenXR, VS Code, PR, QoL, Dev1, Dev2",
+            "unity": "Unity, C#, GameObject, MonoBehaviour, Prefab, Inspector, Hierarchy, Asset, Shader, HDRP, URP",
+            "unreal": "Unreal Engine, Blueprint, C++, Actor, Component, Level, Material, Niagara, Lumen, Nanite",
+            "web": "JavaScript, TypeScript, React, Vue, Angular, Node.js, npm, API, REST, GraphQL, CSS, HTML",
+            "ai": "AI, ML, LLM, GPT, Transformer, PyTorch, TensorFlow, CUDA, GPU, API, Prompt, Fine-tuning",
+        }
+        self.initial_prompt = prompts.get(domain, prompts["godot"])
 
-    def transcribe(self, audio_path, output_srt_path=None, language_code=None, diarize=False):
+    def transcribe(self, audio_path, output_srt_path=None, language_code=None, diarize=False,
+                   enable_ai_optimize=False, ai_api_key=None, ai_api_url=None, ai_model=None,
+                   ai_optimize_level="medium", progress_callback=None):
         """
         Transcribe audio file to text (SRT format).
         
@@ -36,6 +56,12 @@ class ASRProcessor:
             output_srt_path (str): Path to save the SRT file. If None, returns the segments.
             language_code (str): Language code (e.g., "eng", "chi"). None for auto-detect.
             diarize (bool): Whether to annotate who is speaking (ElevenLabs only).
+            enable_ai_optimize (bool): 是否启用 AI 优化（修正术语、合并句子、去口语化）
+            ai_api_key (str): AI API Key（用于优化）
+            ai_api_url (str): AI API URL
+            ai_model (str): AI 模型名称
+            ai_optimize_level (str): 优化强度 "light"/"medium"/"heavy"
+            progress_callback: 进度回调函数
             
         Returns:
             list: List of segments if output_srt_path is None.
@@ -44,14 +70,69 @@ class ASRProcessor:
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-        # 使用 Faster-Whisper 进行转录
-        segments = self._transcribe_faster_whisper(audio_path, language_code)
+        # Step 1: 使用 Faster-Whisper 进行原始转录
+        if progress_callback:
+            progress_callback("Step 1: 运行 Whisper ASR...")
+        print("Step 1: Running Whisper ASR...")
         
+        raw_segments = self._transcribe_faster_whisper(audio_path, language_code)
+        final_segments = raw_segments
+        
+        print(f"Whisper 转录完成: {len(raw_segments)} 条字幕")
+        
+        # Step 2: AI 优化（关键步骤！修正术语、合并破碎句子、去口语化）
+        print(f"[DEBUG] enable_ai_optimize={enable_ai_optimize}, ai_api_key={'有' if ai_api_key else '无'}")
+        
+        if enable_ai_optimize and ai_api_key:
+            if progress_callback:
+                progress_callback("Step 2: AI 精修中（修正术语、合并句子）...")
+            print("Step 2: Optimizing with AI (LLM)...")
+            print(f"[DEBUG] 使用模型: {ai_model or 'deepseek-chat'}")
+            print(f"[DEBUG] API URL: {ai_api_url or 'https://api.deepseek.com/v1/chat/completions'}")
+            print(f"[DEBUG] 优化强度: {ai_optimize_level}")
+            
+            try:
+                final_segments = self.optimize_with_ai(
+                    raw_segments,
+                    api_key=ai_api_key,
+                    api_url=ai_api_url or "https://api.deepseek.com/v1/chat/completions",
+                    model=ai_model or "deepseek-chat",
+                    optimize_level=ai_optimize_level,
+                    progress_callback=progress_callback
+                )
+                print(f"AI 优化完成: {len(raw_segments)} -> {len(final_segments)} 条字幕")
+                
+                # Step 2.5: 按标点符号切分长句子
+                if progress_callback:
+                    progress_callback("Step 2.5: 按标点切分长句子...")
+                final_segments = self._split_by_punctuation(final_segments)
+                print(f"标点切分完成: {len(final_segments)} 条字幕")
+                
+                if progress_callback:
+                    progress_callback(f"✓ AI 精修完成: {len(raw_segments)} -> {len(final_segments)} 条")
+            except Exception as e:
+                print(f"AI Optimization failed, using raw segments. Error: {e}")
+                import traceback
+                traceback.print_exc()
+                if progress_callback:
+                    progress_callback(f"⚠️ AI 优化失败: {e}，使用原始结果")
+        elif enable_ai_optimize:
+            print("Warning: AI optimize enabled but no API key provided")
+            if progress_callback:
+                progress_callback("⚠️ AI 优化已启用但未提供 API Key，请先在翻译模块配置")
+        else:
+            print("[DEBUG] AI 优化未启用，跳过 Step 2")
+            if progress_callback:
+                progress_callback("跳过 AI 精修（未启用）")
+        
+        # Step 3: 保存结果
         if output_srt_path:
-            self._save_as_srt(segments, output_srt_path)
+            if progress_callback:
+                progress_callback("Step 3: 保存字幕文件...")
+            self._save_as_srt(final_segments, output_srt_path)
             return output_srt_path
         
-        return segments
+        return final_segments
 
     def _transcribe_whisper(self, audio_path):
         """Transcribe using Whisper in a separate process to avoid DLL conflicts."""
@@ -261,20 +342,32 @@ class ASRProcessor:
         # 转录参数
         print(f"Transcribing {audio_path}...")
         
+        # 获取 prompt（帮助识别专有名词）
+        # 如果没有设置 prompt，使用默认的 Godot 术语表
+        initial_prompt = getattr(self, 'initial_prompt', None)
+        if not initial_prompt:
+            # 默认使用 Godot 技术术语，帮助 Whisper 更准确识别
+            initial_prompt = "Godot, GDScript, Node, Scene, Signal, Export, OnReady, TileMap, Wayland, OpenXR, VS Code, PR, QoL, Quality of Life, Dev1, Dev2, Inspector, Viewport, Shader, AnimationPlayer"
+        
+        print(f"Using prompt: {initial_prompt[:80]}...")
+        
         segments_generator, info = model.transcribe(
             audio_path,
             language=language_code if language_code and language_code != "None" else None,
             task="transcribe",
-            beam_size=5,
-            best_of=5,
-            temperature=0.0,
-            word_timestamps=True,
-            condition_on_previous_text=False,  # 减少幻觉和错误累积
-            vad_filter=getattr(self, 'use_vad', True),
+            beam_size=5,                       # 保持 5，提高准确率
+            best_of=5,                         # 多次采样取最佳
+            temperature=0.0,                   # 确定性输出
+            word_timestamps=True,              # 词级时间戳
+            condition_on_previous_text=True,   # 启用上下文，提高连贯性和术语一致性
+            initial_prompt=initial_prompt,     # 专有名词提示，帮助识别 Wayland, QoL, OnReady 等
+            vad_filter=getattr(self, 'use_vad', True),  # 确保 VAD 开启
             vad_parameters=vad_parameters,
             no_speech_threshold=0.6,           # 静音检测阈值
             log_prob_threshold=-1.0,           # 对数概率阈值
             compression_ratio_threshold=2.4,   # 压缩比阈值（检测重复）
+            repetition_penalty=1.1,            # 轻微惩罚重复，避免 "we'll we'll" 这类问题
+            no_repeat_ngram_size=3,            # 禁止 3-gram 重复
         )
         
         # 收集结果
@@ -906,6 +999,96 @@ class ASRProcessor:
         
         return optimized
     
+    def _split_by_punctuation(self, segments, max_chars=80):
+        """
+        按标点符号（逗号、句号）切分过长的字幕
+        
+        Args:
+            segments: 字幕列表
+            max_chars: 超过此字符数才切分
+            
+        Returns:
+            切分后的字幕列表
+        """
+        import re
+        
+        split_segments = []
+        
+        for seg in segments:
+            text = seg.get("text", "").strip()
+            start = seg.get("start", 0)
+            end = seg.get("end", 0)
+            duration = end - start
+            
+            # 如果文本较短，不切分
+            if len(text) <= max_chars:
+                split_segments.append(seg)
+                continue
+            
+            # 按句号、问号、感叹号、逗号切分
+            # 优先按句号切分，其次按逗号
+            parts = []
+            
+            # 先尝试按句号/问号/感叹号切分
+            sentences = re.split(r'([.!?])\s+', text)
+            if len(sentences) > 1:
+                # 重组句子（保留标点）
+                current = ""
+                for i, part in enumerate(sentences):
+                    if part in '.!?':
+                        current += part
+                        if current.strip():
+                            parts.append(current.strip())
+                        current = ""
+                    else:
+                        current += part
+                if current.strip():
+                    parts.append(current.strip())
+            
+            # 如果没有句号切分，尝试按逗号切分
+            if len(parts) <= 1:
+                parts = []
+                clauses = re.split(r',\s+', text)
+                if len(clauses) > 1:
+                    # 合并过短的片段
+                    current = ""
+                    for clause in clauses:
+                        if len(current) + len(clause) < 50:
+                            current = current + ", " + clause if current else clause
+                        else:
+                            if current.strip():
+                                parts.append(current.strip())
+                            current = clause
+                    if current.strip():
+                        parts.append(current.strip())
+            
+            # 如果还是没有切分，保持原样
+            if len(parts) <= 1:
+                split_segments.append(seg)
+                continue
+            
+            # 按比例分配时间
+            total_chars = sum(len(p) for p in parts)
+            current_time = start
+            
+            for i, part in enumerate(parts):
+                part_duration = duration * (len(part) / total_chars) if total_chars > 0 else duration / len(parts)
+                part_end = current_time + part_duration
+                
+                # 最后一个片段使用原始结束时间
+                if i == len(parts) - 1:
+                    part_end = end
+                
+                split_segments.append({
+                    "start": current_time,
+                    "end": part_end,
+                    "text": part
+                })
+                
+                current_time = part_end
+        
+        return split_segments
+    
     def _apply_post_processing(self, segments):
         """
         应用 ASR 后处理优化
@@ -916,12 +1099,16 @@ class ASRProcessor:
             from video_tool.core.asr_post_processor import optimize_asr_output
             
             print("Applying ASR post-processing...")
+            # 使用实例属性或默认值
+            max_duration = getattr(self, 'max_segment_duration', 5.0)
+            max_words = getattr(self, 'max_words_per_segment', 10)
+            
             optimized = optimize_asr_output(
                 segments,
-                min_duration=1.5,
-                max_duration=8.0,   # 最大 8 秒
-                min_words=4,
-                max_words=20        # 最大 20 词
+                min_duration=1.0,   # 最小 1 秒
+                max_duration=max_duration,  # 默认最大 5 秒
+                min_words=2,        # 最小 2 词
+                max_words=max_words # 默认最大 10 词
             )
             print(f"Post-processing: {len(segments)} -> {len(optimized)} segments")
             
@@ -976,31 +1163,76 @@ class ASRProcessor:
         if not segments:
             return segments
         
+        # 技术术语表（帮助修正 ASR 识别错误）
+        tech_glossary = "Godot, GDScript, Node, Scene, Signal, Export, OnReady, TileMap, Wayland, OpenXR, VS Code, PR, QoL (Quality of Life), Dev1, Dev2, FKeys, Inspector, Viewport, Shader, AnimationPlayer, CharacterBody, RigidBody, Area2D, Area3D, CollisionShape, RayCast, NavigationAgent, TileSet, Sprite, TextureRect, Control, CanvasLayer, SubViewport"
+        
         # 根据优化强度选择提示词
         if optimize_level == "light":
-            system_prompt = """你是字幕断句专家。请优化以下ASR识别的字幕断句，使其更自然。
+            system_prompt = f"""你是字幕断句专家。请优化以下ASR识别的英文字幕断句，使其更自然。
+
+**重要：保持英文原文，绝对不要翻译成中文或其他语言！**
+
+技术术语表（必须严格遵守）：[{tech_glossary}]
 
 规则：
 1. 只调整断句位置，不修改文字内容
 2. 在语义完整的地方断句，避免句子中间断开
 3. 可以合并过短的相邻句子，或拆分过长的句子
-4. 保持时间轴连续，合理分配时间"""
+4. 保持时间轴连续，合理分配时间
+5. 修正术语拼写（如 Weyland -> Wayland, qol -> QoL, on ready -> OnReady）
+6. 输出必须是英文，不要翻译"""
+
         elif optimize_level == "heavy":
-            system_prompt = """你是专业字幕编辑。请完全重写以下ASR识别的字幕，使其流畅自然。
+            system_prompt = f"""你是专业的视频字幕编辑，专门负责 Godot 游戏引擎的技术视频。请根据以下规则严格优化英文字幕：
 
-规则：
-1. 可以完全重写句子，使表达更清晰流畅
-2. 删除所有口语化的填充词和重复
-3. 优化断句，使每条字幕长度适中
-4. 保持原意不变，时间轴合理分配"""
-        else:  # medium
-            system_prompt = """你是字幕优化专家。请优化以下ASR识别的字幕，使其更流畅。
+**重要：保持英文原文，绝对不要翻译成中文或其他语言！输出必须是英文！**
 
-规则：
-1. 优化断句位置，在语义完整处断开
-2. 适当润色语句，删除明显的口语填充词（如"嗯"、"那个"）
-3. 保持原意和风格不变
-4. 时间轴需要合理对应文本长度"""
+技术术语表（必须严格遵守）：[{tech_glossary}]
+
+1. **修正术语**：
+   - 错误示例：Weyland -> 正确：Wayland
+   - 错误示例：qol -> 正确：QoL
+   - 错误示例：on ready -> 正确：OnReady
+   - 错误示例：g d script -> 正确：GDScript
+
+2. **修复断句 (最重要)**：
+   - ASR 经常在介词(in, on, at, for, with)或形容词后错误断行
+   - 务必将这些破碎的片段合并为语义完整的句子
+   - 确保每一行字幕都是一个完整的意群
+
+3. **去口语化**：
+   - 删除无意义的 "Um", "Uh", "So, like...", "You know" 以及重复的单词
+   - 但要保留演讲者的语气，不要改写得过于书面化
+
+4. **格式要求**：
+   - 严格保持输入的时间轴格式
+   - 如果合并了两行，请使用第一行的开始时间和第二行的结束时间
+   - 输出必须是英文，不要翻译"""
+
+        else:  # medium (推荐用于字幕精修)
+            system_prompt = f"""你是专业的视频字幕编辑，专门负责 Godot 游戏引擎的技术视频。请根据以下规则严格优化英文字幕：
+
+**重要：保持英文原文，绝对不要翻译成中文或其他语言！输出必须是英文！**
+
+技术术语表（必须严格遵守）：[{tech_glossary}]
+
+1. **修正术语**：
+   - 错误示例：Weyland -> 正确：Wayland
+   - 错误示例：qol -> 正确：QoL
+   - 错误示例：on ready -> 正确：OnReady
+
+2. **修复断句 (最重要)**：
+   - ASR 经常在介词(in, on, at)或形容词后错误断行。请务必将这些破碎的片段合并为语义完整的句子。
+   - 确保每一行字幕都是一个完整的意群。
+
+3. **去口语化**：
+   - 删除无意义的 "Um", "Uh", "So, like...", "You know" 以及重复的单词 (如 "we'll we'll")。
+   - 但要保留演讲者的语气，不要改写得过于书面化。
+
+4. **格式要求**：
+   - 严格保持输入的时间轴格式。
+   - 如果合并了两行，请使用第一行的开始时间和第二行的结束时间。
+   - 输出必须是英文，不要翻译成任何其他语言！"""
         
         # 准备输入数据
         input_lines = []
@@ -1022,7 +1254,7 @@ class ASRProcessor:
             if progress_callback:
                 progress_callback(f"AI优化中... 批次 {batch_idx + 1}/{total_batches}")
             
-            user_message = f"""请优化以下 {len(batch_lines)} 条字幕：
+            user_message = f"""请优化以下 {len(batch_lines)} 条英文字幕（不要翻译，保持英文）：
 
 {chr(10).join(batch_lines)}
 
@@ -1030,7 +1262,8 @@ class ASRProcessor:
 - 每行格式: 序号|开始时间|结束时间|优化后文本
 - 时间格式: HH:MM:SS,mmm
 - 可以合并或拆分条目，但时间必须连续
-- 只输出优化结果，不要其他说明"""
+- 只输出优化结果，不要其他说明
+- 重要：保持英文原文，不要翻译！"""
             
             headers = {
                 "Content-Type": "application/json",

@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import Qt, QSize
 from .config_dialog import ConfigDialog
+from .llm_config_dialog import LLMConfigDialog
 from .widgets import (AudioExtractorWidget, ASRWidget, SubtitleWidget, 
                      TTSWidget, TranscoderWidget, VideoComposerWidget,
                      ConsoleWindow, console_info)
@@ -98,6 +99,9 @@ class MainWindow(QMainWindow):
         self.config_action = QAction("配置", self)
         self.config_action.triggered.connect(self.open_config)
         
+        self.llm_config_action = QAction("LLM 模型配置", self)
+        self.llm_config_action.triggered.connect(self.open_llm_config)
+        
         self.console_action = QAction("控制台", self)
         self.console_action.setCheckable(True)
         self.console_action.setChecked(False)
@@ -125,6 +129,7 @@ class MainWindow(QMainWindow):
         # File Menu
         file_menu = menu_bar.addMenu("文件")
         file_menu.addAction(self.config_action)
+        file_menu.addAction(self.llm_config_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
         
@@ -140,6 +145,11 @@ class MainWindow(QMainWindow):
 
     def open_config(self):
         dialog = ConfigDialog(self)
+        dialog.exec()
+    
+    def open_llm_config(self):
+        """打开 LLM 配置对话框"""
+        dialog = LLMConfigDialog(self)
         dialog.exec()
     
     def toggle_console(self, checked):

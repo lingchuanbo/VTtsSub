@@ -164,6 +164,28 @@ class ASRPostProcessor:
         (r'\bavAilable\b', 'available'),
         (r'\bcommUnity\b', 'community'),
         (r'\bcommUnIty\b', 'community'),
+        # 修复 Weyland -> Wayland
+        (r'\bWeyland\b', 'Wayland'),
+        (r'\bweyland\b', 'Wayland'),
+    ]
+    
+    # 口语填充词（需要删除）
+    FILLER_WORDS = [
+        r'\b(um|uh|ah|eh|er|hmm|hm|mm)\b',           # 语气词
+        r'\b(like,?\s+)?you know,?\s*',              # "you know"
+        r'\b(I mean,?\s*)',                          # "I mean"
+        r'\b(basically,?\s*)',                       # "basically"（过度使用时）
+        r'\b(actually,?\s*)',                        # "actually"（句首多余时）
+        r'\b(so,?\s+)(?=so\b)',                      # 重复的 "so so"
+        r'\b(and,?\s+)(?=and\b)',                    # 重复的 "and and"
+    ]
+    
+    # 重复词修复模式
+    REPETITION_FIXES = [
+        (r"\b(\w+)\s+\1\b", r"\1"),                  # 连续重复词: "we'll we'll" -> "we'll"
+        (r"\b(the|a|an)\s+\1\b", r"\1"),             # 重复冠词
+        (r"\b(is|are|was|were)\s+\1\b", r"\1"),      # 重复 be 动词
+        (r"\b(to|of|for|in|on)\s+\1\b", r"\1"),      # 重复介词
     ]
     
     # 句子结束标点
@@ -182,12 +204,12 @@ class ASRPostProcessor:
     QUESTION_WORDS = ('who', 'what', 'where', 'when', 'why', 'how', 'which', 'whose')
     
     def __init__(self, 
-                 min_segment_duration: float = 1.5,
-                 max_segment_duration: float = 8.0,  # 降低到 8 秒
-                 min_words: int = 4,
-                 max_words: int = 20,  # 降低到 20 词
-                 merge_gap_threshold: float = 0.3,  # 降低间隔阈值
-                 use_external_dict: bool = True):  # 使用外部词库
+                 min_segment_duration: float = 1.0,   # 最小 1 秒
+                 max_segment_duration: float = 5.0,   # 最大 5 秒（更短）
+                 min_words: int = 2,                  # 最小 2 词
+                 max_words: int = 10,                 # 最大 10 词（更短）
+                 merge_gap_threshold: float = 0.2,   # 更小的合并阈值
+                 use_external_dict: bool = True):    # 使用外部词库
         """
         初始化后处理器
         
@@ -236,6 +258,9 @@ class ASRPostProcessor:
             words=s.get("words", [])
         ) for s in segments]
         
+        # 步骤 0: 去口语化（删除填充词和重复）
+        segs = self._remove_fillers(segs)
+        
         # 步骤 1: 修复标点（先修复标点，便于后续判断）
         segs = self._fix_punctuation(segs)
         
@@ -253,6 +278,27 @@ class ASRPostProcessor:
         
         # 转换回字典
         return [s.to_dict() for s in segs]
+    
+    def _remove_fillers(self, segments: List[Segment]) -> List[Segment]:
+        """去口语化：删除填充词和重复词"""
+        for seg in segments:
+            text = seg.text
+            
+            # 删除填充词
+            for pattern in self.FILLER_WORDS:
+                text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+            
+            # 修复重复词
+            for pattern, replacement in self.REPETITION_FIXES:
+                text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+            
+            # 清理多余空格
+            text = ' '.join(text.split())
+            
+            seg.text = text
+        
+        # 过滤掉变成空的段落
+        return [seg for seg in segments if seg.text.strip()]
     
     def _fix_common_errors(self, segments: List[Segment]) -> List[Segment]:
         """修复常见 ASR 错误"""
@@ -386,8 +432,8 @@ class ASRPostProcessor:
         if gap > self.merge_gap_threshold * (merge_count + 1):
             return False
         
-        # 如果已经合并了很多段，更保守
-        if merge_count >= 3:
+        # 如果已经合并了2段以上，更保守
+        if merge_count >= 2:
             # 只有非常短的段落才继续合并
             if next_seg.word_count >= self.min_words and next_seg.duration >= self.min_segment_duration:
                 return False
@@ -748,20 +794,20 @@ class TechnicalTermCorrector:
 
 
 def optimize_asr_output(segments: List[Dict], 
-                        min_duration: float = 1.5,
-                        max_duration: float = 8.0,
-                        min_words: int = 4,
-                        max_words: int = 20,
+                        min_duration: float = 1.0,
+                        max_duration: float = 5.0,
+                        min_words: int = 2,
+                        max_words: int = 10,
                         custom_terms: Dict[str, str] = None) -> List[Dict]:
     """
     优化 ASR 输出的便捷函数
     
     Args:
         segments: 原始段落列表
-        min_duration: 最小段落时长
-        max_duration: 最大段落时长
-        min_words: 最小词数
-        max_words: 最大词数
+        min_duration: 最小段落时长（默认1秒）
+        max_duration: 最大段落时长（默认5秒，更短的字幕）
+        min_words: 最小词数（默认2词）
+        max_words: 最大词数（默认10词，更短的字幕）
         custom_terms: 自定义术语映射
         
     Returns:

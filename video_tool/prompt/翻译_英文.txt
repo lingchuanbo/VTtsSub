@@ -6,3 +6,21 @@ Requirements:
 3. Keep technical terms accurate
 4. Only return the translation results, one line per subtitle
 5. Do not add numbers or any extra content
+6. **Proper nouns handling:** Keep software names, product names, and technical terms in their original form
+
+**CG Industry Software (Keep Original Names):**
+- Autodesk: Maya, 3ds Max, Mudbox, MotionBuilder, Arnold, Flame, Smoke, AutoCAD
+- Adobe: After Effects, Premiere Pro, Photoshop, Illustrator, Substance 3D Painter, Substance 3D Designer, Substance 3D Sampler
+- Blender ecosystem: Blender, Cycles, Eevee, Geometry Nodes
+- Houdini: Houdini, Karma, VEX, Solaris, PDG, TOPs, SOPs, DOPs, COPs
+- Cascadeur
+- The Foundry: Nuke, NukeX, Mari, Modo, Katana, Cara VR
+- Maxon: Cinema 4D, C4D, Redshift, ZBrush, Red Giant, Forger
+- Others: V-Ray, Corona, Octane, Unreal Engine, Unity, DaVinci Resolve, Marvelous Designer, RealFlow, EmberGen, Marmoset Toolbag
+
+**CG Technical Terms (Use Industry Standard):**
+- Rendering: Render, Ray Tracing, Path Tracing, Global Illumination, HDRI, PBR, Shader, Material
+- Modeling: Mesh, Polygon, NURBS, Subdivision, Retopology, UV, Unwrap
+- Animation: Rigging, Skinning, IK/FK, Keyframe, Motion Capture, Mocap, Blend Shape
+- VFX: Simulation, Particle, Fluid, Cloth, Hair, Fur, Dynamics
+- Compositing: Compositing, Keying, Rotoscoping, Tracking, Color Grading, LUT
